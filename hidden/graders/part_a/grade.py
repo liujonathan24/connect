@@ -79,7 +79,7 @@ def grade(paths, n_openings=8, workers=4):
         else:
             good.append(p)
     jobs = [(p, b, n_openings) for p in good for b in bots]
-    if workers > 1:
+    if workers > 1 and sys.platform.startswith("linux"):
         with mp.get_context("fork").Pool(workers) as pool:
             out = pool.map(_job, jobs)
     else:

@@ -12,7 +12,7 @@ runs that share an anchor can be compared.
 """
 
 import multiprocessing as mp
-import os
+import sys
 from dataclasses import dataclass
 
 import numpy as np
@@ -71,7 +71,12 @@ class Table:
 
 
 def round_robin(players, spec, openings, workers=1, anchor=None, verbose=False):
-    """Every pair plays a match on every opening, both colors."""
+    """Every pair plays a match on every opening, both colors.
+
+    workers > 1 plays pairs in parallel processes (Linux only; elsewhere it
+    runs in one process). Set torch.set_num_threads(1) first when players
+    are networks.
+    """
     names = list(players)
     n = len(names)
     wins = np.zeros((n, n))
@@ -80,7 +85,7 @@ def round_robin(players, spec, openings, workers=1, anchor=None, verbose=False):
     jobs = [(i, j, names[i], names[j], spec, openings) for i in range(n) for j in range(i + 1, n)]
     _POOL.clear()
     _POOL.update(players)
-    if workers > 1 and hasattr(os, "fork"):
+    if workers > 1 and sys.platform.startswith("linux"):   # forked workers are not safe with torch on macOS
         ctx = mp.get_context("fork")
         with ctx.Pool(workers) as pool:
             results = pool.imap_unordered(_run_pair, jobs)
