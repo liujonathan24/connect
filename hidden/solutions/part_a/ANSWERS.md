@@ -5,17 +5,18 @@ Numbers marked (measured) come from the scripts in this folder; see
 
 ## Rewards
 
-**1. Zero reward.** (A follow-up that strong teams find: even with a
-correct ±1 reward, PPO from scratch barely moves against these bots, because
-the agent almost never wins, its value head learns "always -1", and the
-advantages vanish. See `results.md`.)
-
-**1. Zero reward, the base answer.** Every return and every advantage is 0 (GAE of all-zero
+**1. Zero reward.** Every return and every advantage is 0 (GAE of all-zero
 rewards gives advantage = -value at first, and the value head quickly fits
 0). The policy gradient is then 0, so the policy only moves by noise from
-the value loss through the shared body. Signs in the log: `pg` near 0,
-`v` near 0, entropy stays near log(13) ≈ 2.56 or drifts at random, and the
-win rates do not change. A good answer reads this off the printed losses.
+the value loss through the shared body. Signs in the log: `pg` and `v` near
+0 after a few updates, and win rates that do not change. With the shipped
+learning rate the noise steps are large, so the entropy also falls to 0 in
+a few updates (one column every time, often illegal moves). A good answer
+reads this off the printed losses.
+
+A follow-up that strong teams find: even with a correct ±1 reward, PPO from
+scratch barely moves against these bots. The agent almost never wins, its
+value head learns "always -1", and the advantages vanish (`results.md`).
 
 **2. Terminal reward and shaping.** +1 win, -1 loss, 0 draw (illegal move:
 -1, or mask it). Shaping for "4 in a row" or "blocked a threat" can change
