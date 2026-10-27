@@ -44,7 +44,7 @@ settings are poor (`gamma` 0.5, `lr` 3e-2, clip 0.9, 30 epochs, no
 advantage normalization, no masking, first player only).
 
 `data/offline_games.jsonl.gz` holds 5,472 games: house bots (strong, styles
-from the held-out pool), the public bots, and `bot_c` games. 1,006 records
+from the held-out pool), the public bots, and `bot_c` games. 1,005 records
 are bad: 665 `bot_c` games with rule breaks, plus planted poison (moves off
 the board, on occupied or floating cells, out of turn, after the end, and
 wrong winner labels). A replay under the rules finds all of them.

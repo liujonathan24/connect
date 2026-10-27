@@ -116,11 +116,11 @@ opponent" without a fix is wrong.
 ## The offline games
 
 **10. Cleaning.** Replay each game with `Board.play` and reject at the first
-problem (`clean_data.py`). Counts (first problem per game): wrong_turn 605
-(mostly bot_c's extra stones), floating 152 (bot_c teleports and planted),
-occupied 79 (bot_c steals and planted), off_board 64, wrong_winner 64,
-after_end 42; total 1,006 of 5,472. The manifest in `hidden/data` labels
-every bad game; the reference checker catches all 1,006 with no false alarms.
+problem (`clean_data.py`). Counts (first problem per game): wrong_turn 606
+(mostly bot_c's extra stones), floating 157 (bot_c teleports and planted),
+occupied 80 (bot_c steals and planted), off_board 60, wrong_winner 60,
+after_end 42; total 1,005 of 5,472. The manifest in `hidden/data` labels
+every bad game; the reference checker catches all 1,005 with no false alarms.
 Expect teams to find each kind; a team that only checks for off-board moves
 misses most of the bad data. Give credit for checking the winner label by
 replay.
