@@ -1,0 +1,370 @@
+"""Train a strong network ("hard bot") for connect6 or connect5.
+
+    python3 hidden/strong/train_strong.py --game connect6 --out hidden/strong/runs/c6
+    python3 hidden/strong/train_strong.py --game connect5 --out hidden/strong/runs/c5
+
+The net has the fixed architecture of connectk/net.py, so it plays exactly
+like a student submission (greedy policy, no search). Two stages:
+
+1. Imitation. Strong rule-based bots (from the held-out pool) play many games
+   against a wide pool. The net learns their moves (policy) and the game
+   results (value).
+
+2. Expert iteration. The net plays with a one-move lookahead: for every legal
+   column it checks for an immediate win, for a move that lets the opponent
+   win at once, and otherwise asks its own value head about the position.
+   The lookahead's choice is a better policy than the raw net. The net is
+   trained to play that choice directly, and the value head learns the
+   results of these games. Games are half self-play, half against bots.
+
+Workers generate games in parallel (one torch thread each). The main process
+trains with all threads between rounds.
+"""
+
+import argparse
+import multiprocessing as mp
+import pathlib
+import sys
+import time
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from connectk.arena import make_openings, play_match  # noqa: E402
+from connectk.game import SPECS, Board, incidence, windows  # noqa: E402
+from connectk.net import ConnectNet, NetPlayer, encode_relative, relative_grid, save_net  # noqa: E402
+from hidden.bots.engine import HeuristicBot, SearchBot  # noqa: E402
+from hidden.bots.heldout import connect5_anchors, connect6_heldout  # noqa: E402
+from hidden.bots.public import connect5_gauges, connect6_public  # noqa: E402
+
+
+# ---------------------------------------------------------------- bot pools
+def bot_pool(spec, seed):
+    """(teachers, everyone): teachers' moves are imitated; everyone are opponents."""
+    if spec.name == "connect6":
+        held = {b.name: b for b in connect6_heldout(seed)}
+        pub = connect6_public(seed)
+        teachers = [held["h09_planner"], held["h08_turtle"], pub["bot_d"], held["h10_search"],
+                    HeuristicBot("t_planner2", seed, defense=[0, 1.5, 6, 24, 96, 384, 0], lookahead=0.7)]
+        everyone = list(held.values()) + [pub["bot_a"], pub["bot_b"], pub["bot_d"]] + teachers[-1:]
+    else:
+        anch = connect5_anchors(seed)
+        gau = connect5_gauges(seed)
+        teachers = [gau["gauge_hard"], anch["anchor_search"],
+                    HeuristicBot("t_planner", seed, attack=[0, 1, 4, 16, 64, 256], defense=[0, 1.2, 5, 20, 80, 0], lookahead=0.8),
+                    HeuristicBot("t_turtle", seed, attack=[0, 0.5, 2, 6, 20, 60], defense=[0, 3, 12, 48, 192, 0], lookahead=0.3),
+                    SearchBot("t_search_def", seed, depth=2, defense_ratio=1.5, noise=0.05)]
+        everyone = list(anch.values()) + list(gau.values()) + teachers[2:] + [
+            HeuristicBot("o_sloppy", seed, epsilon=0.4, temperature=1.0),
+            HeuristicBot("o_stacker", seed, stack=3.0, low=0.5, center=0.0),
+            HeuristicBot("o_rusher", seed, attack=[0, 1, 8, 64, 512, 4096], defense=[0, 0, 0.5, 2, 10, 0], avoid_gift=False)]
+    return teachers, everyone
+
+
+# ---------------------------------------------------------------- lookahead
+def lookahead_q(net, boards):
+    """One-move lookahead for each board (side to move = "me").
+
+    Returns Q (B, cols) with -inf on illegal columns, and the net's policy
+    logits for the boards (used to break ties).
+    """
+    spec = boards[0].spec
+    R, C, k = spec.rows, spec.cols, spec.k
+    win, inc = windows(spec), incidence(spec)
+    parents = np.stack([relative_grid(b) for b in boards])
+    heights = np.stack([b.heights for b in boards])
+    bi, ci = np.nonzero(heights < R)
+    M = len(bi)
+    child = parents[bi].copy()
+    child[np.arange(M), heights[bi, ci], ci] = 1
+    flat = child.reshape(M, -1)
+    cells = flat[:, win]
+    own = (cells == 1).sum(-1)
+    opp = (cells == 2).sum(-1)
+    iwin = (own == k).any(1)
+    h2 = heights[bi].copy()
+    h2[np.arange(M), ci] += 1
+    full = (h2 >= R).all(1)
+    hot = ((opp == k - 1) & (own == 0)).astype(np.float32)
+    threat_cells = (hot @ inc.T) > 0
+    land = np.zeros((M, R * C), dtype=bool)
+    m2, cc = np.nonzero(h2 < R)
+    land[m2, h2[m2, cc] * C + cc] = True
+    threat = (threat_cells & land).any(1)
+    need = ~iwin & ~full & ~threat
+    q = np.zeros(M)
+    q[iwin] = 1.0
+    q[~iwin & ~full & threat] = -1.0
+    with torch.no_grad():
+        logits, _ = net(torch.from_numpy(encode_relative(parents)))
+        if need.any():
+            swapped = np.where(child[need] == 1, 2, np.where(child[need] == 2, 1, 0)).astype(np.int8)
+            _, v = net(torch.from_numpy(encode_relative(swapped)))
+            q[need] = -v.numpy()
+    Q = np.full((len(boards), C), -np.inf)
+    Q[bi, ci] = q
+    return Q, logits.numpy()
+
+
+def choose_from_q(Q, logits, rng, explore_temp=0.0):
+    legal = np.isfinite(Q)
+    if explore_temp > 0:
+        z = np.where(legal, Q / explore_temp, -np.inf)
+        p = np.exp(z - z.max())
+        p /= p.sum()
+        return int(rng.choice(len(p), p=p))
+    lp = logits - logits[legal].max()
+    score = np.where(legal, Q + 1e-3 * lp, -np.inf)
+    return int(np.argmax(score))
+
+
+def soft_target(Q, temp=0.05):
+    legal = np.isfinite(Q)
+    z = np.where(legal, Q / temp, -np.inf)
+    p = np.exp(z - z.max())
+    return (p / p.sum()).astype(np.float32)
+
+
+# ---------------------------------------------------------------- workers
+def _teacher_games(args):
+    spec_name, n_games, seed = args
+    spec = SPECS[spec_name]
+    rng = np.random.default_rng(seed)
+    teachers, everyone = bot_pool(spec, seed)
+    tnames = {t.name for t in teachers}
+    grids, targets, zs, players = [], [], [], []
+    for _ in range(n_games):
+        a = teachers[rng.integers(len(teachers))]
+        b = everyone[rng.integers(len(everyone))] if rng.random() < 0.6 else teachers[rng.integers(len(teachers))]
+        if rng.random() < 0.5:
+            a, b = b, a
+        board = Board(spec)
+        for c in make_openings(spec, 1, plies=2, seed=int(rng.integers(1 << 30)))[0]:
+            board.play(c)
+        start = len(grids)
+        bots = {1: a, 2: b}
+        while not board.done:
+            bot = bots[board.player]
+            col = bot.choose(board.copy())
+            if bot.name in tnames:
+                grids.append(relative_grid(board))
+                targets.append(col)
+                players.append(board.player)
+            board.play(col)
+        for t in range(start, len(grids)):
+            zs.append(0.0 if board.winner == 0 else (1.0 if board.winner == players[t] else -1.0))
+    return (np.array(grids, dtype=np.int8).reshape(-1, spec.rows, spec.cols),
+            np.eye(spec.cols, dtype=np.float32)[np.array(targets, dtype=int)] if targets else np.zeros((0, spec.cols), np.float32),
+            np.array(zs, dtype=np.float32))
+
+
+def _expert_games(args):
+    spec_name, state, n_games, seed, p_self, batch = args
+    torch.set_num_threads(1)
+    spec = SPECS[spec_name]
+    rng = np.random.default_rng(seed)
+    net = ConnectNet(spec)
+    net.load_state_dict(state)
+    net.eval()
+    _, everyone = bot_pool(spec, seed)
+    out_g, out_t, out_z = [], [], []
+    started = 0
+    live = []
+
+    def new_game():
+        board = Board(spec)
+        for c in make_openings(spec, 1, plies=2, seed=int(rng.integers(1 << 30)))[0]:
+            board.play(c)
+        if rng.random() < p_self:
+            sides = {1: None, 2: None}
+        else:
+            bot = everyone[rng.integers(len(everyone))]
+            sides = {1: None, 2: bot} if rng.random() < 0.5 else {1: bot, 2: None}
+        return {"board": board, "sides": sides, "rec": [], "plies": 0}
+
+    while started < n_games or live:
+        while len(live) < batch and started < n_games:
+            live.append(new_game())
+            started += 1
+        # bots move until each live game waits for the learner (or ends)
+        for g in live:
+            b = g["board"]
+            while not b.done and g["sides"][b.player] is not None:
+                b.play(g["sides"][b.player].choose(b.copy()))
+        waiting = [g for g in live if not g["board"].done]
+        if waiting:
+            Q, logits = lookahead_q(net, [g["board"] for g in waiting])
+            for g, q, lg in zip(waiting, Q, logits):
+                b = g["board"]
+                g["rec"].append((relative_grid(b), soft_target(q), b.player))
+                temp = 0.15 if g["plies"] < 6 else 0.0
+                if temp == 0.0 and rng.random() < 0.03:
+                    temp = 0.3
+                b.play(choose_from_q(q, lg, rng, temp))
+                g["plies"] += 1
+        still = []
+        for g in live:
+            b = g["board"]
+            if b.done:
+                for grid, tgt, pl in g["rec"]:
+                    out_g.append(grid)
+                    out_t.append(tgt)
+                    out_z.append(0.0 if b.winner == 0 else (1.0 if b.winner == pl else -1.0))
+            else:
+                still.append(g)
+        live = still
+    return (np.array(out_g, dtype=np.int8).reshape(-1, spec.rows, spec.cols),
+            np.array(out_t, dtype=np.float32).reshape(-1, spec.cols), np.array(out_z, dtype=np.float32))
+
+
+def _cat(parts):
+    return tuple(np.concatenate([p[i] for p in parts]) for i in range(3))
+
+
+# ---------------------------------------------------------------- training
+class Buffer:
+    def __init__(self, cap):
+        self.cap = cap
+        self.g = self.t = self.z = None
+
+    def add(self, g, t, z):
+        if self.g is None:
+            self.g, self.t, self.z = g, t, z
+        else:
+            self.g = np.concatenate([self.g, g])[-self.cap:]
+            self.t = np.concatenate([self.t, t])[-self.cap:]
+            self.z = np.concatenate([self.z, z])[-self.cap:]
+
+    def __len__(self):
+        return 0 if self.g is None else len(self.g)
+
+
+def train_steps(net, opt, buf, steps, batch, rng, vf=1.0):
+    net.train()
+    losses = []
+    for _ in range(steps):
+        idx = rng.integers(len(buf), size=batch)
+        g, t, z = buf.g[idx], buf.t[idx], buf.z[idx]
+        flip = rng.random(batch) < 0.5
+        g = np.where(flip[:, None, None], g[:, :, ::-1], g)
+        t = np.where(flip[:, None], t[:, ::-1], t)
+        x = torch.from_numpy(encode_relative(g))
+        logits, v = net(x)
+        target = torch.from_numpy(np.ascontiguousarray(t))
+        p_loss = -(target * F.log_softmax(logits, -1)).sum(-1).mean()
+        v_loss = F.mse_loss(v, torch.from_numpy(z))
+        loss = p_loss + vf * v_loss
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+        opt.step()
+        losses.append((p_loss.item(), v_loss.item()))
+    net.eval()
+    return np.mean(losses, axis=0)
+
+
+def panel(spec, seed=777):
+    if spec.name == "connect6":
+        held = {b.name: b for b in connect6_heldout(seed)}
+        pub = connect6_public(seed)
+        return {"bot_d": pub["bot_d"], "h09_planner": held["h09_planner"], "h10_search": held["h10_search"],
+                "h08_turtle": held["h08_turtle"], "h07_balanced": held["h07_balanced"]}
+    anch = connect5_anchors(seed)
+    gau = connect5_gauges(seed)
+    return {"gauge_hard": gau["gauge_hard"], "anchor_search": anch["anchor_search"],
+            "anchor_heuristic": anch["anchor_heuristic"]}
+
+
+def evaluate(net, spec, n_openings=4):
+    player = NetPlayer(net, "net")
+    ops = make_openings(spec, n_openings, plies=2, seed=4242)
+    return {n: play_match(player, b, spec, ops).score for n, b in panel(spec).items()}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--game", default="connect6", choices=["connect6", "connect5"])
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--teacher_games", type=int, default=3000)
+    ap.add_argument("--bc_steps", type=int, default=6000)
+    ap.add_argument("--iters", type=int, default=60)
+    ap.add_argument("--games_per_iter", type=int, default=96)
+    ap.add_argument("--steps_per_iter", type=int, default=150)
+    ap.add_argument("--p_self", type=float, default=0.5)
+    ap.add_argument("--buffer", type=int, default=300_000)
+    ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--resume", default=None, help="start from these weights and skip imitation")
+    args = ap.parse_args()
+
+    spec = SPECS[args.game]
+    out = pathlib.Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(args.seed)
+    torch.manual_seed(args.seed)
+    torch.set_num_threads(args.workers)
+    net = ConnectNet(spec)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+    buf = Buffer(args.buffer)
+    ctx = mp.get_context("fork")
+    t0 = time.time()
+    log = open(out / "log.txt", "a")
+
+    def say(msg):
+        msg = f"[{time.time() - t0:7.0f}s] {msg}"
+        print(msg, flush=True)
+        log.write(msg + "\n")
+        log.flush()
+
+    if args.resume:
+        net.load_state_dict(torch.load(args.resume, weights_only=True))
+    else:
+        data_path = out / "teacher.npz"
+        if data_path.exists():
+            d = np.load(data_path)
+            g, t, z = d["g"], d["t"], d["z"]
+        else:
+            per = args.teacher_games // (args.workers * 4)
+            jobs = [(spec.name, per, args.seed * 1000 + i) for i in range(args.workers * 4)]
+            with ctx.Pool(args.workers) as pool:
+                g, t, z = _cat(pool.map(_teacher_games, jobs))
+            np.savez_compressed(data_path, g=g, t=t, z=z)
+        say(f"teacher data: {len(g)} positions")
+        buf.add(g, t, z)
+        for chunk in range(args.bc_steps // 500):
+            pl, vl = train_steps(net, opt, buf, 500, args.batch, rng)
+            say(f"imitation {(chunk + 1) * 500} steps: policy {pl:.3f} value {vl:.3f}")
+        save_net(net, out / "bc.pt")
+        say("after imitation: " + "  ".join(f"{n} {s:.2f}" for n, s in evaluate(net, spec).items()))
+
+    best = -1
+    for it in range(1, args.iters + 1):
+        state = {k: v.clone() for k, v in net.state_dict().items()}
+        per = max(1, args.games_per_iter // args.workers)
+        jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_self, 12) for _ in range(args.workers)]
+        with ctx.Pool(args.workers) as pool:
+            g, t, z = _cat(pool.map(_expert_games, jobs))
+        buf.add(g, t, z)
+        pl, vl = train_steps(net, opt, buf, args.steps_per_iter, args.batch, rng)
+        msg = f"iter {it}: +{len(g)} positions (buffer {len(buf)}), policy {pl:.3f} value {vl:.3f}"
+        if it % 5 == 0 or it == args.iters:
+            scores = evaluate(net, spec)
+            mean = float(np.mean(list(scores.values())))
+            msg += "  eval " + "  ".join(f"{n} {s:.2f}" for n, s in scores.items()) + f"  mean {mean:.3f}"
+            save_net(net, out / f"iter_{it:04d}.pt")
+            if mean >= best:
+                best = mean
+                save_net(net, out / "best.pt")
+                msg += "  (best)"
+        save_net(net, out / "last.pt")
+        say(msg)
+
+
+if __name__ == "__main__":
+    main()

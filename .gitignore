@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+runs/
+checkpoints/
+hidden/strong/runs/
+*.ipynb_checkpoints
+replay.html
+submission.pt
