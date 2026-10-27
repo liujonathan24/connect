@@ -5,7 +5,12 @@ Numbers marked (measured) come from the scripts in this folder; see
 
 ## Rewards
 
-**1. Zero reward.** Every return and every advantage is 0 (GAE of all-zero
+**1. Zero reward.** (A follow-up that strong teams find: even with a
+correct ±1 reward, PPO from scratch barely moves against these bots, because
+the agent almost never wins, its value head learns "always -1", and the
+advantages vanish. See `results.md`.)
+
+**1. Zero reward, the base answer.** Every return and every advantage is 0 (GAE of all-zero
 rewards gives advantage = -value at first, and the value head quickly fits
 0). The policy gradient is then 0, so the policy only moves by noise from
 the value loss through the shared body. Signs in the log: `pg` near 0,
@@ -129,7 +134,11 @@ replay.
 
 **11. Using them.** Good uses: imitation learning (cross-entropy on the
 house bots' moves) as a warm start before PPO; training the value head on
-the game results; both with mirror images. Pitfall: PPO's update assumes the
+the game results; both with mirror images. What to imitate matters a lot:
+in our runs, copying every fair player gave a held-out score of 0.23, and
+copying only the moves of the side that won (and never bot_a, which plays
+at random 20% of the time) gave 0.65 (`results.md`). Full marks need some
+choice of this kind, with a reason. Pitfall: PPO's update assumes the
 data came from the current policy (it uses π_old(a|s) in the ratio). Offline
 moves come from other policies; you do not know their probabilities, and
 the importance ratios would be wrong or undefined. So offline data goes into
@@ -163,8 +172,9 @@ kind, and a statement of how many games were actually played.
 ## Grading guide
 
 * Score (the main result): from `grade.py`. See `results.md` for reference
-  points (an untrained net, the shipped trainer, the reference trainer and the
-  strong network).
+  points and score bands: the floor is about 0.14 (untrained), fixed PPO from
+  scratch stays near it (sparse reward), winners-only imitation of the clean
+  offline games reaches about 0.65, and naive PPO on top of it lowers it.
 * Write-up: 14 questions. Core: 1, 3, 4, 6, 8, 10. A team that finds the
   cheater with game-level evidence and cleans the data correctly has done the
   heart of the problem, even with a modest score.
