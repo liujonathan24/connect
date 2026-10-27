@@ -94,19 +94,27 @@ class FrozenNet:
         board.play(self.choose(board))
 
 
-def offline_positions(path="data/offline_games.jsonl.gz"):
-    """(grids, moves, outcomes) for moves by fair players in clean games."""
+def offline_positions(path="data/offline_games.jsonl.gz", winners_only=True):
+    """(grids, moves, outcomes) from clean games without bot_c.
+
+    With winners_only, the policy data keeps only the moves of the side that
+    won (both sides in a draw) and never bot_a's moves (it plays at random
+    20% of the time). Copying every player mixes styles that disagree.
+    """
     grids, moves, zs = [], [], []
     with gzip.open(path, "rt") as f:
         for line in f:
             g = json.loads(line)
             if check_game(g) is not None or "bot_c" in (g["p1"], g["p2"]):
                 continue
+            names = {1: g["p1"], 2: g["p2"]}
             b = Board(SPEC)
             for p, _, c in g["moves"]:
-                grids.append(relative_grid(b))
-                moves.append(c)
-                zs.append(0.0 if g["winner"] == 0 else (1.0 if g["winner"] == p else -1.0))
+                keep = not winners_only or ((g["winner"] in (0, p)) and names[p] != "bot_a")
+                if keep:
+                    grids.append(relative_grid(b))
+                    moves.append(c)
+                    zs.append(0.0 if g["winner"] == 0 else (1.0 if g["winner"] == p else -1.0))
                 b.play(c)
     return np.array(grids, np.int8), np.array(moves), np.array(zs, np.float32)
 
