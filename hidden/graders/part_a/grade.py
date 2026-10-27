@@ -13,7 +13,9 @@ masks illegal columns). The score of a submission is the mean over the
 held-out bots of its score against that bot, so each bot weighs the same.
 
 The pool: twelve rule-based bots (hidden/bots/heldout.py) and, when its
-weights exist, the trained network hidden/strong/connect6_strong.pt.
+weights exist, two bots built on the trained network
+hidden/strong/connect6_strong.pt: h13_neural plays it with an MCTS on top
+(hidden/strong/players.py), h14_net plays it greedily, like a submission.
 """
 
 import argparse
@@ -32,6 +34,7 @@ from connectk.game import CONNECT6  # noqa: E402
 
 SPEC = CONNECT6
 STRONG = ROOT / "hidden/strong/connect6_strong.pt"
+STRONG_SIMS = 100
 OPENING_SEED = 20261027
 BOT_SEED = 99
 
@@ -42,7 +45,9 @@ def heldout_pool():
     pool = {b.name: b for b in connect6_heldout(BOT_SEED)}
     if STRONG.exists():
         from connectk.net import NetPlayer, load_net
-        pool["h13_neural"] = NetPlayer(load_net(SPEC, STRONG), "h13_neural")
+        from hidden.strong.players import NeuralMCTS
+        pool["h13_neural"] = NeuralMCTS.load(SPEC, STRONG, sims=STRONG_SIMS, name="h13_neural")
+        pool["h14_net"] = NetPlayer(load_net(SPEC, STRONG), "h14_net")
     return pool
 
 

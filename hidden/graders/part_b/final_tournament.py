@@ -8,7 +8,9 @@ pair plays every opening twice, once with each color. Win 1, draw 0.5,
 loss 0; nets play greedily (argmax over legal columns, no search).
 
 Fixed anchors play too: a random player, two rule-based bots, and (when its
-weights exist) the trained network hidden/strong/connect5_strong.pt. They
+weights exist) two bots on our trained network hidden/strong/connect5_strong.pt:
+anchor_neural (the net with an MCTS on top, the hardest player) and
+anchor_net (the same net played greedily, the format teams hand in). They
 pin the Elo scale (anchor_heuristic = 1000), so you can compare events.
 
 Placement: teams are ranked by points from all their games (anchors
@@ -37,7 +39,9 @@ def anchors():
     from hidden.bots.heldout import connect5_anchors
     pool = connect5_anchors(seed=7)
     if STRONG.exists():
-        pool["anchor_neural"] = NetPlayer(load_net(SPEC, STRONG), "anchor_neural")
+        from hidden.strong.players import NeuralMCTS
+        pool["anchor_neural"] = NeuralMCTS.load(SPEC, STRONG, sims=200, name="anchor_neural")
+        pool["anchor_net"] = NetPlayer(load_net(SPEC, STRONG), "anchor_net")
     return pool
 
 
