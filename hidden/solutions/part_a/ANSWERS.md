@@ -53,7 +53,9 @@ also matches the grader, which only considers legal columns.
 | `opponents` | all four | includes the cheater | drop bot_c |
 
 Full marks: at least the reward, gamma, lr, clip/epochs, masking, sides and
-the cheater, each with a reason.
+the cheater, each with a reason. Bonus: noticing that 30 epochs with
+minibatch 32 also make every update slow (about 1,000 gradient steps per
+1,024 samples; about 50 s per update on one CPU core).
 
 **5. Colors.** A first-player-only agent is much weaker as the second
 player: it has never seen positions with an odd number of stones where it

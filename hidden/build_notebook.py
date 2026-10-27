@@ -107,8 +107,9 @@ code(r"""
 net = ConnectNet(SPEC)
 print("parameters:", count_parameters(net))
 x = torch.from_numpy(encode_batch([b]))
-logits, value = net(x)
-print("input", tuple(x.shape), " logits", tuple(logits.shape), " value", float(value))
+with torch.no_grad():
+    logits, value = net(x)
+print("input", tuple(x.shape), " logits", tuple(logits.shape), " value", round(value.item(), 3))
 
 # An untrained net against the gauges (each opening twice, once per color):
 openings = make_openings(SPEC, 6, seed=1)
