@@ -113,7 +113,21 @@ def _games(args):
             np.array(out_b, bool).reshape(-1, spec.cols), np.array(out_m, bool), agree, total, blunders)
 
 
-def train(net, opt, data, steps, batch, rng, vf, tw):
+def tactics_loss(net, tactics, n, rng):
+    """Blunder penalty on n positions from the tactical set (grids, bad masks)."""
+    tg, tb = tactics
+    i = rng.integers(len(tg), size=n)
+    g, b = tg[i], tb[i]
+    flip = rng.random(n) < 0.5
+    g = np.where(flip[:, None, None], g[:, :, ::-1], g)
+    b = np.where(flip[:, None], b[:, ::-1], b)
+    legal = torch.from_numpy(np.ascontiguousarray(g[:, -1, :] == 0))   # top cell empty
+    logp = F.log_softmax(net(torch.from_numpy(encode_relative(g)))[0].masked_fill(~legal, -1e9), -1)
+    p_bad = (logp.exp() * torch.from_numpy(np.ascontiguousarray(b))).sum(-1).clamp(max=1 - 1e-6)
+    return -torch.log1p(-p_bad).mean()
+
+
+def train(net, opt, data, steps, batch, rng, vf, tw, tactics=None):
     g, t, z, bad, w = data
     p = w / w.sum()
     net.train()
@@ -128,11 +142,15 @@ def train(net, opt, data, steps, batch, rng, vf, tw):
         logits, v = net(torch.from_numpy(encode_relative(gg)))
         logp = F.log_softmax(logits, -1)
         p_loss = -(torch.from_numpy(np.ascontiguousarray(tt)) * logp).sum(-1).mean()
-        # push probability off tactical blunders: -log(1 - P(blunder))
-        p_bad = (logp.exp() * torch.from_numpy(np.ascontiguousarray(bb))).sum(-1).clamp(max=1 - 1e-6)
+        # push probability off tactical blunders, among legal moves: -log(1 - P(blunder))
+        legal = torch.from_numpy(np.ascontiguousarray(gg[:, -1, :] == 0))
+        lp_legal = F.log_softmax(logits.masked_fill(~legal, -1e9), -1)
+        p_bad = (lp_legal.exp() * torch.from_numpy(np.ascontiguousarray(bb))).sum(-1).clamp(max=1 - 1e-6)
         t_loss = -torch.log1p(-p_bad).mean()
         v_loss = F.mse_loss(v, torch.from_numpy(z[i]))
         loss = p_loss + tw * t_loss + vf * v_loss
+        if tactics is not None:
+            loss = loss + tw * tactics_loss(net, tactics, batch // 2, rng)
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -159,6 +177,7 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--vf", type=float, default=0.5)
     ap.add_argument("--tactic_weight", type=float, default=2.0, help="weight of the blunder penalty")
+    ap.add_argument("--tactics", default=None, help="tactical set from make_tactics.py, trained alongside")
     ap.add_argument("--hard", type=float, default=10.0,
                     help="sampling weight of positions where the net blundered or disagreed with the search")
     ap.add_argument("--decay", type=float, default=0.7, help="weight of each older round")
@@ -175,6 +194,10 @@ def main():
     net.load_state_dict(torch.load(args.init, weights_only=True))
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     rounds = []
+    tactics = None
+    if args.tactics:
+        d = np.load(args.tactics)
+        tactics = (d["grids"], d["bad"])
     t0 = time.time()
     log = open(out / "log.txt", "a")
 
@@ -204,7 +227,7 @@ def main():
         w = np.concatenate([np.full(len(x[0]), args.decay ** (len(rounds) - 1 - k)) * (1 + (args.hard - 1) * x[4])
                             for k, x in enumerate(rounds)])
         data = tuple(np.concatenate([x[k] for x in rounds]) for k in range(4)) + (w,)
-        pl, vl = train(net, opt, data, args.steps, args.batch, rng, args.vf, args.tactic_weight)
+        pl, vl = train(net, opt, data, args.steps, args.batch, rng, args.vf, args.tactic_weight, tactics)
         save_net(net, out / f"round_{r:03d}.pt")
         save_net(net, out / "last.pt")
         scores = evaluate(net, spec, n_openings=8)
