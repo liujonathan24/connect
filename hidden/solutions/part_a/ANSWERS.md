@@ -136,9 +136,9 @@ replay.
 **11. Using them.** Good uses: imitation learning (cross-entropy on the
 house bots' moves) as a warm start before PPO; training the value head on
 the game results; both with mirror images. What to imitate matters a lot:
-in our runs, copying every fair player gave a held-out score of 0.23, and
+in our runs, copying every fair player gave a held-out score of 0.20, and
 copying only the moves of the side that won (and never bot_a, which plays
-at random 20% of the time) gave 0.65 (`results.md`). Full marks need some
+at random 20% of the time) gave 0.64 (`results.md`). Full marks need some
 choice of this kind, with a reason. Pitfall: PPO's update assumes the
 data came from the current policy (it uses π_old(a|s) in the ratio). Offline
 moves come from other policies; you do not know their probabilities, and
@@ -173,9 +173,9 @@ kind, and a statement of how many games were actually played.
 ## Grading guide
 
 * Score (the main result): from `grade.py`. See `results.md` for reference
-  points and score bands: the floor is about 0.14 (untrained), fixed PPO from
+  points and score bands: the floor is about 0.13 (untrained), fixed PPO from
   scratch stays near it (sparse reward), winners-only imitation of the clean
-  offline games reaches about 0.65, and naive PPO on top of it lowers it.
+  offline games reaches about 0.64, and naive PPO on top of it lowers it.
 * Write-up: 14 questions. Core: 1, 3, 4, 6, 8, 10. A team that finds the
   cheater with game-level evidence and cleans the data correctly has done the
   heart of the problem, even with a modest score.
