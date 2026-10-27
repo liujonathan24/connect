@@ -10,7 +10,10 @@ like a student submission (greedy policy, no search). Two stages:
    against a wide pool. The net learns their moves (policy) and the game
    results (value).
 
-2. Expert iteration. The net plays with a one-move lookahead: for every legal
+2. Expert iteration. With --teacher mcts (the stronger choice), a batched
+   MCTS (hidden/strong/mcts.py, AlphaZero style) picks the moves and the net
+   learns the visit counts and the game results. With --teacher lookahead,
+   the net plays with a one-move lookahead: for every legal
    column it checks for an immediate win, for a move that lets the opponent
    win at once, and otherwise asks its own value head about the position.
    The lookahead's choice is a better policy than the raw net. The net is
@@ -21,15 +24,20 @@ Workers generate games in parallel (one torch thread each). The main process
 trains with all threads between rounds.
 """
 
-import argparse
-import multiprocessing as mp
-import pathlib
-import sys
-import time
+import os
 
-import numpy as np
-import torch
-import torch.nn.functional as F
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")   # many small matrix products: BLAS threads only fight
+
+import argparse  # noqa: E402
+import multiprocessing as mp  # noqa: E402
+import pathlib  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -40,6 +48,7 @@ from connectk.net import ConnectNet, NetPlayer, encode_relative, relative_grid, 
 from hidden.bots.engine import HeuristicBot, SearchBot  # noqa: E402
 from hidden.bots.heldout import connect5_anchors, connect6_heldout  # noqa: E402
 from hidden.bots.public import connect5_gauges, connect6_public  # noqa: E402
+from hidden.strong.mcts import _inc_t  # noqa: E402
 
 
 # ---------------------------------------------------------------- bot pools
@@ -74,7 +83,7 @@ def lookahead_q(net, boards):
     """
     spec = boards[0].spec
     R, C, k = spec.rows, spec.cols, spec.k
-    win, inc = windows(spec), incidence(spec)
+    win, inc_t = windows(spec), _inc_t(spec)
     parents = np.stack([relative_grid(b) for b in boards])
     heights = np.stack([b.heights for b in boards])
     bi, ci = np.nonzero(heights < R)
@@ -90,7 +99,7 @@ def lookahead_q(net, boards):
     h2[np.arange(M), ci] += 1
     full = (h2 >= R).all(1)
     hot = ((opp == k - 1) & (own == 0)).astype(np.float32)
-    threat_cells = (hot @ inc.T) > 0
+    threat_cells = (hot @ inc_t) > 0
     land = np.zeros((M, R * C), dtype=bool)
     m2, cc = np.nonzero(h2 < R)
     land[m2, h2[m2, cc] * C + cc] = True
@@ -129,7 +138,7 @@ def _win_landings(c_who, c_other, heights, spec):
     """(n, cells) bool: landing cells where the player with counts c_who completes a line."""
     R, C, k = spec.rows, spec.cols, spec.k
     hot = ((c_who == k - 1) & (c_other == 0)).astype(np.float32)
-    cells = (hot @ incidence(spec).T) > 0
+    cells = (hot @ _inc_t(spec)) > 0
     land = np.zeros_like(cells)
     m, c = np.nonzero(heights < R)
     land[m, heights[m, c] * C + c] = True
@@ -297,6 +306,67 @@ def _expert_games(args):
             np.array(out_t, dtype=np.float32).reshape(-1, spec.cols), np.array(out_z, dtype=np.float32))
 
 
+def _mcts_games(args):
+    """Self-play (and some games against bots) with MCTS choosing the learner's moves."""
+    spec_name, state, n_games, seed, p_bot, batch, sims = args
+    from hidden.strong.mcts import run_mcts
+    torch.set_num_threads(1)
+    spec = SPECS[spec_name]
+    rng = np.random.default_rng(seed)
+    net = ConnectNet(spec)
+    net.load_state_dict(state)
+    net.eval()
+    _, everyone = bot_pool(spec, seed)
+    temp_plies = 8 if spec.cols <= 9 else 12
+    out_g, out_t, out_z = [], [], []
+    started, live = 0, []
+
+    def new_game():
+        board = Board(spec)
+        for c in make_openings(spec, 1, plies=2, seed=int(rng.integers(1 << 30)))[0]:
+            board.play(c)
+        sides = {1: None, 2: None}
+        if rng.random() < p_bot:
+            bot = everyone[rng.integers(len(everyone))]
+            sides[int(rng.integers(1, 3))] = bot
+        return {"board": board, "sides": sides, "rec": [], "plies": 0}
+
+    while started < n_games or live:
+        while len(live) < batch and started < n_games:
+            live.append(new_game())
+            started += 1
+        for g in live:
+            b = g["board"]
+            while not b.done and g["sides"][b.player] is not None:
+                b.play(g["sides"][b.player].choose(b.copy()))
+        waiting = [g for g in live if not g["board"].done]
+        if waiting:
+            visits = run_mcts(net, [g["board"] for g in waiting], sims=sims, rng=rng)
+            for g, n in zip(waiting, visits):
+                b = g["board"]
+                pi = (n / n.sum()).astype(np.float32)
+                g["rec"].append((relative_grid(b), pi, b.player))
+                if g["plies"] < temp_plies:
+                    a = int(rng.choice(len(pi), p=pi))
+                else:
+                    a = int(np.argmax(n))
+                b.play(a)
+                g["plies"] += 1
+        still = []
+        for g in live:
+            b = g["board"]
+            if b.done:
+                for grid, tgt, pl in g["rec"]:
+                    out_g.append(grid)
+                    out_t.append(tgt)
+                    out_z.append(0.0 if b.winner == 0 else (1.0 if b.winner == pl else -1.0))
+            else:
+                still.append(g)
+        live = still
+    return (np.array(out_g, dtype=np.int8).reshape(-1, spec.rows, spec.cols),
+            np.array(out_t, dtype=np.float32).reshape(-1, spec.cols), np.array(out_z, dtype=np.float32))
+
+
 def _cat(parts):
     return tuple(np.concatenate([p[i] for p in parts]) for i in range(3))
 
@@ -373,6 +443,9 @@ def main():
     ap.add_argument("--steps_per_iter", type=int, default=150)
     ap.add_argument("--p_self", type=float, default=0.5)
     ap.add_argument("--depth", type=int, default=1, choices=[1, 2], help="lookahead depth of the teacher")
+    ap.add_argument("--teacher", default="lookahead", choices=["lookahead", "mcts"])
+    ap.add_argument("--sims", type=int, default=96, help="MCTS simulations per move")
+    ap.add_argument("--p_bot", type=float, default=0.2, help="MCTS teacher: share of games against bots")
     ap.add_argument("--buffer", type=int, default=300_000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -429,10 +502,16 @@ def main():
     for it in range(1, args.iters + 1):
         state = {k: v.clone() for k, v in net.state_dict().items()}
         per = max(1, args.games_per_iter // args.workers)
-        jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_self, 12, args.depth)
-                for _ in range(args.workers)]
+        if args.teacher == "mcts":
+            fn = _mcts_games
+            jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_bot, per, args.sims)
+                    for _ in range(args.workers)]
+        else:
+            fn = _expert_games
+            jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_self, 12, args.depth)
+                    for _ in range(args.workers)]
         with ctx.Pool(args.workers) as pool:
-            g, t, z = _cat(pool.map(_expert_games, jobs))
+            g, t, z = _cat(pool.map(fn, jobs))
         buf.add(g, t, z)
         pl, vl = train_steps(net, opt, buf, args.steps_per_iter, args.batch, rng)
         msg = f"iter {it}: +{len(g)} positions (buffer {len(buf)}), policy {pl:.3f} value {vl:.3f}"

@@ -64,6 +64,26 @@ def incidence(spec):
     return inc
 
 
+@lru_cache(maxsize=None)
+def cell_windows(spec):
+    """Int array (n_cells, m): the windows through each cell, padded with n_windows.
+
+    Sum a per-window array `x` over the windows through each cell with
+    np.append(x, 0)[cell_windows(spec)].sum(-1) (no matrix product needed).
+    """
+    win = windows(spec)
+    lists = [[] for _ in range(spec.rows * spec.cols)]
+    for w, cells in enumerate(win):
+        for c in cells:
+            lists[c].append(w)
+    m = max(len(x) for x in lists)
+    arr = np.full((len(lists), m), len(win), dtype=np.int64)
+    for c, ws in enumerate(lists):
+        arr[c, :len(ws)] = ws
+    arr.setflags(write=False)
+    return arr
+
+
 class Board:
     """One game position. `player` is the side to move (1 or 2)."""
 

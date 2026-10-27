@@ -15,7 +15,7 @@ This file goes to students only inside a packed blob (see hidden/build_blobs.py)
 
 import numpy as np
 
-from connectk.game import Board, incidence, windows
+from connectk.game import Board, cell_windows, windows
 
 BIG = 1e6
 
@@ -26,7 +26,7 @@ class _Lines:
     def __init__(self, board, me):
         spec = board.spec
         self.win = windows(spec)
-        self.inc = incidence(spec)
+        self.cw = cell_windows(spec)
         flat = board.grid.ravel()
         cells = flat[self.win]
         self.own = (cells == me).sum(axis=1)
@@ -36,8 +36,8 @@ class _Lines:
 
     def win_cells(self, who_own, who_opp):
         """Empty cells that complete a line for the player whose counts are who_own."""
-        hot = ((who_own == self.k - 1) & (who_opp == 0)).astype(np.float32)
-        return (self.inc @ hot > 0) & self.empty
+        hot = np.append((who_own == self.k - 1) & (who_opp == 0), False)
+        return hot[self.cw].any(axis=1) & self.empty
 
 
 def landing_cells(board):
@@ -110,7 +110,7 @@ class HeuristicBot(Bot):
         own_next = np.minimum(L.own + 1, L.k)
         gain = np.where(clean_own, a[own_next] - a[L.own], 0.0)
         gain += np.where(clean_opp & (L.opp > 0), d[L.opp], 0.0)
-        return L.inc @ gain.astype(np.float32), L
+        return np.append(gain, 0.0)[L.cw].sum(axis=1), L
 
     def choose(self, board):
         spec = board.spec
