@@ -308,7 +308,7 @@ def _expert_games(args):
 
 def _mcts_games(args):
     """Self-play (and some games against bots) with MCTS choosing the learner's moves."""
-    spec_name, state, n_games, seed, p_bot, batch, sims = args
+    spec_name, state, n_games, seed, p_bot, batch, sims, sharpen, p_dagger = args
     from hidden.strong.mcts import run_mcts
     torch.set_num_threads(1)
     spec = SPECS[spec_name]
@@ -329,7 +329,8 @@ def _mcts_games(args):
         if rng.random() < p_bot:
             bot = everyone[rng.integers(len(everyone))]
             sides[int(rng.integers(1, 3))] = bot
-        return {"board": board, "sides": sides, "rec": [], "plies": 0}
+        # DAgger game: the net plays its own greedy move; the search only labels the position
+        return {"board": board, "sides": sides, "rec": [], "plies": 0, "dagger": rng.random() < p_dagger}
 
     while started < n_games or live:
         while len(live) < batch and started < n_games:
@@ -342,12 +343,19 @@ def _mcts_games(args):
         waiting = [g for g in live if not g["board"].done]
         if waiting:
             visits = run_mcts(net, [g["board"] for g in waiting], sims=sims, rng=rng)
-            for g, n in zip(waiting, visits):
+            if any(g["dagger"] for g in waiting):
+                with torch.no_grad():
+                    grids = np.stack([relative_grid(g["board"]) for g in waiting])
+                    own_logits = net(torch.from_numpy(encode_relative(grids)))[0].numpy()
+            for i, (g, n) in enumerate(zip(waiting, visits)):
                 b = g["board"]
                 pi = (n / n.sum()).astype(np.float32)
-                g["rec"].append((relative_grid(b), pi, b.player))
+                sharp = n ** (1.0 / sharpen)
+                g["rec"].append((relative_grid(b), (sharp / sharp.sum()).astype(np.float32), b.player))
                 if g["plies"] < temp_plies:
                     a = int(rng.choice(len(pi), p=pi))
+                elif g["dagger"]:
+                    a = int(np.argmax(np.where(b.legal_mask(), own_logits[i], -np.inf)))
                 else:
                     a = int(np.argmax(n))
                 b.play(a)
@@ -446,6 +454,10 @@ def main():
     ap.add_argument("--teacher", default="lookahead", choices=["lookahead", "mcts"])
     ap.add_argument("--sims", type=int, default=96, help="MCTS simulations per move")
     ap.add_argument("--p_bot", type=float, default=0.2, help="MCTS teacher: share of games against bots")
+    ap.add_argument("--sharpen", type=float, default=1.0,
+                    help="MCTS policy target is visits**(1/sharpen); below 1 moves it toward the top move")
+    ap.add_argument("--p_dagger", type=float, default=0.0,
+                    help="share of games where the net plays its own greedy moves (the search only labels)")
     ap.add_argument("--buffer", type=int, default=300_000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -504,8 +516,8 @@ def main():
         per = max(1, args.games_per_iter // args.workers)
         if args.teacher == "mcts":
             fn = _mcts_games
-            jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_bot, per, args.sims)
-                    for _ in range(args.workers)]
+            jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_bot, per, args.sims,
+                     args.sharpen, args.p_dagger) for _ in range(args.workers)]
         else:
             fn = _expert_games
             jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_self, 12, args.depth)
