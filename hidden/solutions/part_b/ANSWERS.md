@@ -65,8 +65,13 @@ train the policy head to predict the search's choice (cross-entropy toward
 the search's visit counts or its best move), and the value head toward the
 game result. The network then plays the improved policy without search.
 `hidden/strong/train_strong.py --teacher mcts` does this with a batched
-MCTS (`hidden/strong/mcts.py`); in our runs a one-move lookahead teacher
-was not enough to get past the rule-based bots, and MCTS was.
+MCTS (`hidden/strong/mcts.py`). On our 4-core CPU it was not enough: the
+MCTS player was much stronger than the greedy net it trained (0.72 vs 0.44
+against our strongest bots), and the net closed only part of the gap. What
+worked for our anchor was imitation of winners' moves from many strong-bot
+games (`hidden/strong/NOTES.md`). A team that explains why distilling a
+search into a greedy policy is hard (the search's choices depend on
+calculation the policy cannot do) gets full marks here.
 
 **9. Symmetry.** Mirror the columns: the same position, with column c
 mapped to cols−1−c, and the same value. Use it to double the data, or to
@@ -97,5 +102,7 @@ concrete, ranked plans.
 
 * Placement in the final (`final_tournament.py`) is the result.
 * Write-up: 12 questions; core: 1, 4, 5, 6, 8.
-* `results.md` (part A folder) has reference strengths for the gauges, the
-  anchors and our strong network.
+* `hidden/strong/NOTES.md` has the strengths of our anchors: the strong
+  network alone scores 0.55 against our three strongest Connect 5 bots, and
+  0.75 with the search on top. A team whose submission beats anchor_net did
+  very well.

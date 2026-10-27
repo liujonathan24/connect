@@ -14,10 +14,16 @@ build_notebook.py               writes part_b_connect5/selfplay.ipynb (edit cell
 make_offline_data.py            writes the Part A offline games and data/offline_manifest.json
 live.py                         games on a live board, recorded cell by cell (shows rule breaks)
 data/offline_manifest.json      what is wrong with each offline game
-strong/train_strong.py          trains the strong networks (imitation, then expert iteration)
-strong/mcts.py                  batched AlphaZero-style MCTS, the teacher for expert iteration
-strong/connect6_strong.pt       strong Connect 6 network (held-out bot h13_neural)
-strong/connect5_strong.pt       strong Connect 5 network (final anchor anchor_neural)
+strong/NOTES.md                 how the strong networks were made; what worked and what did not
+strong/make_winner_data.py      winners-only imitation data from strong-bot games (the recipe that worked)
+strong/train_imitation.py       trains a network on such data
+strong/pick_best.py             picks the best checkpoint with a large match
+strong/players.py               NeuralMCTS: a network with an MCTS on top (the hard bots)
+strong/mcts.py                  batched AlphaZero-style MCTS
+strong/connect6_strong.pt       strong Connect 6 network (held-out bots h13_neural and h14_net)
+strong/connect5_strong.pt       strong Connect 5 network (final anchors anchor_neural and anchor_net)
+strong/train_strong.py, distill.py, make_tactics.py, ppo_strong.py, ab_distill.py, engine/
+                                earlier methods, kept for reference (see NOTES.md)
 solutions/part_a/ANSWERS.md     answers and grading guide, Part A
 solutions/part_a/results.md     measured scores: baseline, reference, strong net
 solutions/part_a/clean_data.py  replays the offline games and rejects bad ones
@@ -38,20 +44,8 @@ python3 hidden/make_offline_data.py          # ~8 minutes on 4 cores
 python3 -m unittest discover tests           # checks that all of these agree
 ```
 
-The strong networks take hours on a CPU. Imitation first, then expert
-iteration with the MCTS teacher, from the imitation weights:
-
-```sh
-python3 hidden/strong/train_strong.py --game connect5 --out hidden/strong/runs/c5 --iters 0
-python3 hidden/strong/train_strong.py --game connect5 --out hidden/strong/runs/c5m \
-    --resume hidden/strong/runs/c5/bc.pt --seed_data hidden/strong/runs/c5/teacher.npz \
-    --teacher mcts --sims 96 --games_per_iter 64 --steps_per_iter 60 --buffer 100000 --lr 5e-4
-# the same for connect6, with --sims 64 --games_per_iter 48 --buffer 120000
-```
-
-Pick the final weights with a large match against the bots (the in-run
-evals use only 8 games per bot), then copy them to
-`hidden/strong/connect5_strong.pt` and `hidden/strong/connect6_strong.pt`.
+The strong networks take a few hours on a CPU; `hidden/strong/NOTES.md`
+gives the recipe and the commands.
 
 ## Check the graders
 

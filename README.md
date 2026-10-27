@@ -50,8 +50,12 @@ the board, on occupied or floating cells, out of turn, after the end, and
 wrong winner labels). A replay under the rules finds all of them.
 
 Grading: `hidden/graders/part_a/grade.py` plays each submission against the
-held-out pool (12 rule-based bots and a trained network), on fixed openings
-with both colors, and reports the mean score per bot.
+held-out pool, on fixed openings with both colors, and reports the mean score
+per bot. The pool: 12 rule-based bots of many styles, and our strong network
+twice: alone (greedy, like a submission) and with an MCTS on top (the hard
+bot; it scores 0.75 against our five strongest rule-based bots). Reference
+scores are in `hidden/solutions/part_a/results.md`: untrained 0.13, shipped
+baseline 0.14, winners-only imitation of the clean offline games 0.64.
 
 ## Part B: Connect 5 by self-play
 
@@ -62,8 +66,13 @@ scrimmages against other teams' files, and the hand-in. Two packed gauge
 bots measure progress.
 
 The final: `hidden/graders/part_b/final_tournament.py` runs a round robin of
-all teams plus fixed anchors (random, two rule-based bots, a trained
-network), and ranks teams by points.
+all teams plus fixed anchors (random, two rule-based bots, our strong network
+alone and with an MCTS on top), and ranks teams by points. The strong network
+alone scores 0.55 against our three strongest Connect 5 bots; with the search
+on top, 0.75.
+
+You can play our strong networks in a browser (`demo/play-connect.html`), and
+teams can do the same with their own: `python3 -m connectk webplay my.pt`.
 
 ## Running the event
 
