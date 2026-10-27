@@ -52,7 +52,7 @@ def _games(args):
     net.eval()
     _, everyone = bot_pool(spec, seed)
     live, started = [], 0
-    out_g, out_t, out_z, out_b = [], [], [], []
+    out_g, out_t, out_z, out_b, out_m = [], [], [], [], []
     agree = total = blunders = 0
 
     def new_game():
@@ -83,8 +83,9 @@ def _games(args):
                 sharp = n ** (1.0 / sharpen) * ~bad      # never a tactical blunder as target
                 if sharp.sum() == 0:
                     sharp = n.astype(float)
-                g["rec"].append((relative_grid(b), (sharp / sharp.sum()).astype(np.float32), b.player, bad))
                 mine = int(np.argmax(np.where(b.legal_mask(), lg, -np.inf)))
+                g["rec"].append((relative_grid(b), (sharp / sharp.sum()).astype(np.float32), b.player, bad,
+                                 bool(bad[mine]) or mine != int(np.argmax(n))))
                 agree += mine == int(np.argmax(n))
                 blunders += bool(bad[mine])
                 total += 1
@@ -98,17 +99,18 @@ def _games(args):
         for g in live:
             if g["b"].done:
                 w = g["b"].winner
-                for grid, t, pl, bad in g["rec"]:
+                for grid, t, pl, bad, miss in g["rec"]:
                     out_g.append(grid)
                     out_t.append(t)
                     out_z.append(0.0 if w == 0 else (1.0 if w == pl else -1.0))
                     out_b.append(bad)
+                    out_m.append(miss)
             else:
                 still.append(g)
         live = still
     return (np.array(out_g, np.int8).reshape(-1, spec.rows, spec.cols),
             np.array(out_t, np.float32).reshape(-1, spec.cols), np.array(out_z, np.float32),
-            np.array(out_b, bool).reshape(-1, spec.cols), agree, total, blunders)
+            np.array(out_b, bool).reshape(-1, spec.cols), np.array(out_m, bool), agree, total, blunders)
 
 
 def train(net, opt, data, steps, batch, rng, vf, tw):
@@ -157,6 +159,8 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--vf", type=float, default=0.5)
     ap.add_argument("--tactic_weight", type=float, default=2.0, help="weight of the blunder penalty")
+    ap.add_argument("--hard", type=float, default=10.0,
+                    help="sampling weight of positions where the net blundered or disagreed with the search")
     ap.add_argument("--decay", type=float, default=0.7, help="weight of each older round")
     ap.add_argument("--keep", type=int, default=8, help="rounds of data to keep")
     ap.add_argument("--seed", type=int, default=0)
@@ -190,13 +194,15 @@ def main():
         with ctx.Pool(args.workers) as pool:
             parts = pool.map(_games, jobs)
         torch.set_num_threads(args.workers)
-        g, t, z, bad = (np.concatenate([p[k] for p in parts]) for k in range(4))
-        total = max(1, sum(p[5] for p in parts))
-        agree = sum(p[4] for p in parts) / total
-        blunder = sum(p[6] for p in parts) / total
-        rounds.append((g, t, z, bad))
+        g, t, z, bad, miss = (np.concatenate([p[k] for p in parts]) for k in range(5))
+        total = max(1, sum(p[6] for p in parts))
+        agree = sum(p[5] for p in parts) / total
+        blunder = sum(p[7] for p in parts) / total
+        rounds.append((g, t, z, bad, miss))
         rounds = rounds[-args.keep:]
-        w = np.concatenate([np.full(len(x[0]), args.decay ** (len(rounds) - 1 - k)) for k, x in enumerate(rounds)])
+        # newer rounds weigh more; positions where the net erred weigh `hard` times more
+        w = np.concatenate([np.full(len(x[0]), args.decay ** (len(rounds) - 1 - k)) * (1 + (args.hard - 1) * x[4])
+                            for k, x in enumerate(rounds)])
         data = tuple(np.concatenate([x[k] for x in rounds]) for k in range(4)) + (w,)
         pl, vl = train(net, opt, data, args.steps, args.batch, rng, args.vf, args.tactic_weight)
         save_net(net, out / f"round_{r:03d}.pt")
