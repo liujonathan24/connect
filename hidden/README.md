@@ -15,6 +15,7 @@ make_offline_data.py            writes the Part A offline games and data/offline
 live.py                         games on a live board, recorded cell by cell (shows rule breaks)
 data/offline_manifest.json      what is wrong with each offline game
 strong/train_strong.py          trains the strong networks (imitation, then expert iteration)
+strong/mcts.py                  batched AlphaZero-style MCTS, the teacher for expert iteration
 strong/connect6_strong.pt       strong Connect 6 network (held-out bot h13_neural)
 strong/connect5_strong.pt       strong Connect 5 network (final anchor anchor_neural)
 solutions/part_a/ANSWERS.md     answers and grading guide, Part A
@@ -37,16 +38,20 @@ python3 hidden/make_offline_data.py          # ~8 minutes on 4 cores
 python3 -m unittest discover tests           # checks that all of these agree
 ```
 
-The strong networks take hours on a CPU:
+The strong networks take hours on a CPU. Imitation first, then expert
+iteration with the MCTS teacher, from the imitation weights:
 
 ```sh
-python3 hidden/strong/train_strong.py --game connect6 --out hidden/strong/runs/c6
-python3 hidden/strong/train_strong.py --game connect5 --out hidden/strong/runs/c5
-cp hidden/strong/runs/c6/best.pt hidden/strong/connect6_strong.pt
-cp hidden/strong/runs/c5/best.pt hidden/strong/connect5_strong.pt
-# continue a run from its last weights:
-python3 hidden/strong/train_strong.py --game connect6 --out hidden/strong/runs/c6b --resume hidden/strong/runs/c6/last.pt
+python3 hidden/strong/train_strong.py --game connect5 --out hidden/strong/runs/c5 --iters 0
+python3 hidden/strong/train_strong.py --game connect5 --out hidden/strong/runs/c5m \
+    --resume hidden/strong/runs/c5/bc.pt --seed_data hidden/strong/runs/c5/teacher.npz \
+    --teacher mcts --sims 96 --games_per_iter 64 --steps_per_iter 60 --buffer 100000 --lr 5e-4
+# the same for connect6, with --sims 64 --games_per_iter 48 --buffer 120000
 ```
+
+Pick the final weights with a large match against the bots (the in-run
+evals use only 8 games per bot), then copy them to
+`hidden/strong/connect5_strong.pt` and `hidden/strong/connect6_strong.pt`.
 
 ## Check the graders
 

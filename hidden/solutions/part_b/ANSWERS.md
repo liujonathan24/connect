@@ -64,8 +64,9 @@ from 0.5: 0.05 ≥ 2·0.5/sqrt(n), so n ≥ 400 games for that one pairing.
 train the policy head to predict the search's choice (cross-entropy toward
 the search's visit counts or its best move), and the value head toward the
 game result. The network then plays the improved policy without search.
-`hidden/strong/train_strong.py` does this with a one-move lookahead
-(immediate win, immediate loss, value of each reply).
+`hidden/strong/train_strong.py --teacher mcts` does this with a batched
+MCTS (`hidden/strong/mcts.py`); in our runs a one-move lookahead teacher
+was not enough to get past the rule-based bots, and MCTS was.
 
 **9. Symmetry.** Mirror the columns: the same position, with column c
 mapped to cols−1−c, and the same value. Use it to double the data, or to
