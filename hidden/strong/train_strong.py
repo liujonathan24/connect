@@ -110,6 +110,81 @@ def lookahead_q(net, boards):
     return Q, logits.numpy()
 
 
+def _drop(grids, heights, cols, stone):
+    """Children of (grids, heights) after dropping `stone` in `cols` (one per row)."""
+    n = np.arange(len(cols))
+    g = grids.copy()
+    g[n, heights[n, cols], cols] = stone
+    h = heights.copy()
+    h[n, cols] += 1
+    return g, h
+
+
+def _lines(grids, spec):
+    flat = grids.reshape(len(grids), -1)[:, windows(spec)]
+    return (flat == 1).sum(-1), (flat == 2).sum(-1)
+
+
+def _win_landings(c_who, c_other, heights, spec):
+    """(n, cells) bool: landing cells where the player with counts c_who completes a line."""
+    R, C, k = spec.rows, spec.cols, spec.k
+    hot = ((c_who == k - 1) & (c_other == 0)).astype(np.float32)
+    cells = (hot @ incidence(spec).T) > 0
+    land = np.zeros_like(cells)
+    m, c = np.nonzero(heights < R)
+    land[m, heights[m, c] * C + c] = True
+    return cells & land
+
+
+def lookahead2_q(net, boards):
+    """One-move lookahead with two-move tactics. Same outputs as lookahead_q.
+
+    For each of my moves a:
+      +1  a wins at once
+      -1  the opponent then has a winning landing cell
+      +1  I then have two or more winning landing cells (a double threat)
+      -1  some reply gives the opponent a double threat while I have no win
+      else minus the net's value of the position after a (opponent to move)
+    """
+    spec = boards[0].spec
+    R, C, k = spec.rows, spec.cols, spec.k
+    parents = np.stack([relative_grid(b) for b in boards])
+    heights = np.stack([b.heights for b in boards])
+    b1, a1 = np.nonzero(heights < R)
+    g1, h1 = _drop(parents[b1], heights[b1], a1, 1)
+    own1, opp1 = _lines(g1, spec)
+    win1 = (own1 == k).any(1)
+    full1 = (h1 >= R).all(1)
+    threat1 = _win_landings(opp1, own1, h1, spec).any(1)
+    double1 = _win_landings(own1, opp1, h1, spec).sum(1) >= 2
+    q1 = np.zeros(len(g1))
+    q1[win1] = 1.0
+    rest = ~win1 & ~full1
+    q1[rest & threat1] = -1.0
+    q1[rest & ~threat1 & double1] = 1.0
+    open1 = np.flatnonzero(rest & ~threat1 & ~double1)
+    crushed = np.zeros(len(g1), dtype=bool)
+    if len(open1):
+        i2, r2 = np.nonzero(h1[open1] < R)
+        parent2 = open1[i2]
+        g2, h2 = _drop(g1[parent2], h1[parent2], r2, 2)
+        own2, opp2 = _lines(g2, spec)
+        bad = (_win_landings(opp2, own2, h2, spec).sum(1) >= 2) & ~_win_landings(own2, opp2, h2, spec).any(1)
+        np.logical_or.at(crushed, parent2, bad)
+        q1[open1[crushed[open1]]] = -1.0
+        ask = open1[~crushed[open1]]
+        if len(ask):
+            swapped = np.where(g1[ask] == 1, 2, np.where(g1[ask] == 2, 1, 0)).astype(np.int8)
+            with torch.no_grad():
+                _, v = net(torch.from_numpy(encode_relative(swapped)))
+            q1[ask] = -v.numpy()
+    with torch.no_grad():
+        logits, _ = net(torch.from_numpy(encode_relative(parents)))
+    Q = np.full((len(boards), C), -np.inf)
+    Q[b1, a1] = q1
+    return Q, logits.numpy()
+
+
 def choose_from_q(Q, logits, rng, explore_temp=0.0):
     legal = np.isfinite(Q)
     if explore_temp > 0:
@@ -163,7 +238,8 @@ def _teacher_games(args):
 
 
 def _expert_games(args):
-    spec_name, state, n_games, seed, p_self, batch = args
+    spec_name, state, n_games, seed, p_self, batch, depth = args
+    search = lookahead2_q if depth == 2 else lookahead_q
     torch.set_num_threads(1)
     spec = SPECS[spec_name]
     rng = np.random.default_rng(seed)
@@ -197,7 +273,7 @@ def _expert_games(args):
                 b.play(g["sides"][b.player].choose(b.copy()))
         waiting = [g for g in live if not g["board"].done]
         if waiting:
-            Q, logits = lookahead_q(net, [g["board"] for g in waiting])
+            Q, logits = search(net, [g["board"] for g in waiting])
             for g, q, lg in zip(waiting, Q, logits):
                 b = g["board"]
                 g["rec"].append((relative_grid(b), soft_target(q), b.player))
@@ -296,11 +372,13 @@ def main():
     ap.add_argument("--games_per_iter", type=int, default=96)
     ap.add_argument("--steps_per_iter", type=int, default=150)
     ap.add_argument("--p_self", type=float, default=0.5)
+    ap.add_argument("--depth", type=int, default=1, choices=[1, 2], help="lookahead depth of the teacher")
     ap.add_argument("--buffer", type=int, default=300_000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default=None, help="start from these weights and skip imitation")
+    ap.add_argument("--seed_data", default=None, help="with --resume: a teacher.npz to fill the buffer first")
     args = ap.parse_args()
 
     spec = SPECS[args.game]
@@ -324,6 +402,10 @@ def main():
 
     if args.resume:
         net.load_state_dict(torch.load(args.resume, weights_only=True))
+        if args.seed_data:
+            d = np.load(args.seed_data)
+            buf.add(d["g"], d["t"], d["z"])
+            say(f"buffer seeded with {len(buf)} positions")
     else:
         data_path = out / "teacher.npz"
         if data_path.exists():
@@ -347,7 +429,8 @@ def main():
     for it in range(1, args.iters + 1):
         state = {k: v.clone() for k, v in net.state_dict().items()}
         per = max(1, args.games_per_iter // args.workers)
-        jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_self, 12) for _ in range(args.workers)]
+        jobs = [(spec.name, state, per, int(rng.integers(1 << 30)), args.p_self, 12, args.depth)
+                for _ in range(args.workers)]
         with ctx.Pool(args.workers) as pool:
             g, t, z = _cat(pool.map(_expert_games, jobs))
         buf.add(g, t, z)
