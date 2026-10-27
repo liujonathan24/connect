@@ -153,7 +153,8 @@ def lookahead2_q(net, boards):
       -1  the opponent then has a winning landing cell
       +1  I then have two or more winning landing cells (a double threat)
       -1  some reply gives the opponent a double threat while I have no win
-      else minus the net's value of the position after a (opponent to move)
+      else minus the net's value of the position after a (opponent to move),
+           or 0 when net is None (tactics only; then no logits are returned)
     """
     spec = boards[0].spec
     R, C, k = spec.rows, spec.cols, spec.k
@@ -182,16 +183,31 @@ def lookahead2_q(net, boards):
         np.logical_or.at(crushed, parent2, bad)
         q1[open1[crushed[open1]]] = -1.0
         ask = open1[~crushed[open1]]
-        if len(ask):
+        if len(ask) and net is not None:
             swapped = np.where(g1[ask] == 1, 2, np.where(g1[ask] == 2, 1, 0)).astype(np.int8)
             with torch.no_grad():
                 _, v = net(torch.from_numpy(encode_relative(swapped)))
             q1[ask] = -v.numpy()
-    with torch.no_grad():
-        logits, _ = net(torch.from_numpy(encode_relative(parents)))
     Q = np.full((len(boards), C), -np.inf)
     Q[b1, a1] = q1
+    if net is None:
+        return Q, None
+    with torch.no_grad():
+        logits, _ = net(torch.from_numpy(encode_relative(parents)))
     return Q, logits.numpy()
+
+
+def tactical_blunders(boards):
+    """(len(boards), cols) bool: moves that are wrong by two-move tactics.
+
+    A move is wrong if a winning move (or a double threat) exists and it is not
+    one, or if it lets the opponent win or make a double threat while another
+    move does not. Exact for these tactics; says nothing about quiet moves.
+    """
+    Q, _ = lookahead2_q(None, boards)
+    legal = np.isfinite(Q)
+    best = np.where(legal, Q, -2).max(axis=1, keepdims=True)
+    return legal & (((best == 1) & (Q < 1)) | ((Q == -1) & (best > -1)))
 
 
 def choose_from_q(Q, logits, rng, explore_temp=0.0):

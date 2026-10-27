@@ -38,7 +38,7 @@ from connectk.arena import make_openings  # noqa: E402
 from connectk.game import SPECS, Board  # noqa: E402
 from connectk.net import ConnectNet, encode_relative, relative_grid, save_net  # noqa: E402
 from hidden.strong.mcts import run_mcts  # noqa: E402
-from hidden.strong.train_strong import bot_pool, evaluate  # noqa: E402
+from hidden.strong.train_strong import bot_pool, evaluate, tactical_blunders  # noqa: E402
 
 
 def _games(args):
@@ -52,8 +52,8 @@ def _games(args):
     net.eval()
     _, everyone = bot_pool(spec, seed)
     live, started = [], 0
-    out_g, out_t, out_z = [], [], []
-    agree = total = 0
+    out_g, out_t, out_z, out_b = [], [], [], []
+    agree = total = blunders = 0
 
     def new_game():
         b = Board(spec)
@@ -77,12 +77,16 @@ def _games(args):
             visits = run_mcts(net, boards, sims=sims, noise_frac=0.0, rng=rng)
             with torch.no_grad():
                 logits = net(torch.from_numpy(encode_relative(np.stack([relative_grid(b) for b in boards]))))[0].numpy()
-            for g, n, lg in zip(waiting, visits, logits):
+            bad_moves = tactical_blunders(boards)
+            for g, n, lg, bad in zip(waiting, visits, logits, bad_moves):
                 b = g["b"]
-                sharp = n ** (1.0 / sharpen)
-                g["rec"].append((relative_grid(b), (sharp / sharp.sum()).astype(np.float32), b.player))
+                sharp = n ** (1.0 / sharpen) * ~bad      # never a tactical blunder as target
+                if sharp.sum() == 0:
+                    sharp = n.astype(float)
+                g["rec"].append((relative_grid(b), (sharp / sharp.sum()).astype(np.float32), b.player, bad))
                 mine = int(np.argmax(np.where(b.legal_mask(), lg, -np.inf)))
                 agree += mine == int(np.argmax(n))
+                blunders += bool(bad[mine])
                 total += 1
                 if g["plies"] < random_plies:
                     a = int(rng.choice(b.legal_moves()))
@@ -94,32 +98,39 @@ def _games(args):
         for g in live:
             if g["b"].done:
                 w = g["b"].winner
-                for grid, t, pl in g["rec"]:
+                for grid, t, pl, bad in g["rec"]:
                     out_g.append(grid)
                     out_t.append(t)
                     out_z.append(0.0 if w == 0 else (1.0 if w == pl else -1.0))
+                    out_b.append(bad)
             else:
                 still.append(g)
         live = still
     return (np.array(out_g, np.int8).reshape(-1, spec.rows, spec.cols),
-            np.array(out_t, np.float32).reshape(-1, spec.cols), np.array(out_z, np.float32), agree, total)
+            np.array(out_t, np.float32).reshape(-1, spec.cols), np.array(out_z, np.float32),
+            np.array(out_b, bool).reshape(-1, spec.cols), agree, total, blunders)
 
 
-def train(net, opt, data, steps, batch, rng, vf):
-    g, t, z, w = data
+def train(net, opt, data, steps, batch, rng, vf, tw):
+    g, t, z, bad, w = data
     p = w / w.sum()
     net.train()
     pl = vl = 0.0
     for _ in range(steps):
         i = rng.choice(len(g), size=batch, p=p)
-        gg, tt = g[i], t[i]
+        gg, tt, bb = g[i], t[i], bad[i]
         flip = rng.random(batch) < 0.5
         gg = np.where(flip[:, None, None], gg[:, :, ::-1], gg)
         tt = np.where(flip[:, None], tt[:, ::-1], tt)
+        bb = np.where(flip[:, None], bb[:, ::-1], bb)
         logits, v = net(torch.from_numpy(encode_relative(gg)))
-        p_loss = -(torch.from_numpy(np.ascontiguousarray(tt)) * F.log_softmax(logits, -1)).sum(-1).mean()
+        logp = F.log_softmax(logits, -1)
+        p_loss = -(torch.from_numpy(np.ascontiguousarray(tt)) * logp).sum(-1).mean()
+        # push probability off tactical blunders: -log(1 - P(blunder))
+        p_bad = (logp.exp() * torch.from_numpy(np.ascontiguousarray(bb))).sum(-1).clamp(max=1 - 1e-6)
+        t_loss = -torch.log1p(-p_bad).mean()
         v_loss = F.mse_loss(v, torch.from_numpy(z[i]))
-        loss = p_loss + vf * v_loss
+        loss = p_loss + tw * t_loss + vf * v_loss
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -145,6 +156,7 @@ def main():
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--vf", type=float, default=0.5)
+    ap.add_argument("--tactic_weight", type=float, default=2.0, help="weight of the blunder penalty")
     ap.add_argument("--decay", type=float, default=0.7, help="weight of each older round")
     ap.add_argument("--keep", type=int, default=8, help="rounds of data to keep")
     ap.add_argument("--seed", type=int, default=0)
@@ -178,20 +190,20 @@ def main():
         with ctx.Pool(args.workers) as pool:
             parts = pool.map(_games, jobs)
         torch.set_num_threads(args.workers)
-        g = np.concatenate([p[0] for p in parts])
-        t = np.concatenate([p[1] for p in parts])
-        z = np.concatenate([p[2] for p in parts])
-        agree = sum(p[3] for p in parts) / max(1, sum(p[4] for p in parts))
-        rounds.append((g, t, z))
+        g, t, z, bad = (np.concatenate([p[k] for p in parts]) for k in range(4))
+        total = max(1, sum(p[5] for p in parts))
+        agree = sum(p[4] for p in parts) / total
+        blunder = sum(p[6] for p in parts) / total
+        rounds.append((g, t, z, bad))
         rounds = rounds[-args.keep:]
         w = np.concatenate([np.full(len(x[0]), args.decay ** (len(rounds) - 1 - k)) for k, x in enumerate(rounds)])
-        data = (np.concatenate([x[0] for x in rounds]), np.concatenate([x[1] for x in rounds]),
-                np.concatenate([x[2] for x in rounds]), w)
-        pl, vl = train(net, opt, data, args.steps, args.batch, rng, args.vf)
+        data = tuple(np.concatenate([x[k] for x in rounds]) for k in range(4)) + (w,)
+        pl, vl = train(net, opt, data, args.steps, args.batch, rng, args.vf, args.tactic_weight)
         save_net(net, out / f"round_{r:03d}.pt")
         save_net(net, out / "last.pt")
         scores = evaluate(net, spec, n_openings=8)
-        say(f"round {r}: {len(g)} new positions, net agrees with search {agree:.2f} (before training), "
+        say(f"round {r}: {len(g)} new positions, net agrees with search {agree:.2f}, "
+            f"blunders {blunder:.3f} (before training), "
             f"policy {pl:.3f} value {vl:.3f}  eval " + "  ".join(f"{n} {s:.2f}" for n, s in scores.items())
             + f"  mean {np.mean(list(scores.values())):.3f}")
 
