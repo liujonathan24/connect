@@ -5,6 +5,7 @@
     python3 -m connectk match a.pt b.pt --game connect5 --openings 20
     python3 -m connectk tournament runs/*.pt --game connect5 --workers 4
     python3 -m connectk watch a.pt b.pt --game connect5 --out replay.html
+    python3 -m connectk webplay my.pt --game connect5 --out play.html   # play your net in a browser
 
 Where a player is asked for, give a .pt file (a network, played greedily),
 "random", or a name from a packed bot file given with --bots
@@ -109,6 +110,14 @@ def cmd_watch(args):
     print(f"wrote {args.out} ({len(recs)} games); open it in a browser")
 
 
+def cmd_webplay(args):
+    from .webplay import net_entry, write_html
+    spec = SPECS[args.game]
+    entries = [net_entry(spec, p, pathlib.Path(p).stem) for p in args.nets]
+    write_html(entries, args.out, args.title)
+    print(f"wrote {args.out}; open it in a browser and play")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="python3 -m connectk", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -147,6 +156,13 @@ def main():
     p.add_argument("--games", type=int, default=2, help="openings (each played with both colors)")
     p.add_argument("--out", default="replay.html")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("webplay", help="write an HTML page to play against a network in the browser")
+    p.add_argument("nets", nargs="+", help="network .pt files (all for --game)")
+    p.add_argument("--game", default="connect5", choices=sorted(SPECS))
+    p.add_argument("--out", default="play.html")
+    p.add_argument("--title", default="Play Connect")
+    p.set_defaults(func=cmd_webplay)
 
     args = ap.parse_args()
     args.func(args)

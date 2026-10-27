@@ -88,4 +88,5 @@ part_b_connect5/      Part B: problem, questions, self-play notebook, gauge bots
 hidden/               held-out bots, graders, answers, reference solutions, strong nets, builders
 tests/                rules, referee, network, bots, environment, data
 demo/connect-replays.html  some recorded games (open in a browser)
+demo/play-connect.html     play against our strong nets in a browser
 ```
