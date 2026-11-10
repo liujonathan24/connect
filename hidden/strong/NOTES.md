@@ -68,3 +68,32 @@ Lessons:
   moves of players who went on to win. Each step of the strong bots'
   play is a pattern the net can learn, and the filter removes the moves
   that lost.
+
+## The big Connect 5 net (10x parameters)
+
+`bignet.py`: a residual net, 128 channels, 7 blocks, 2.1M parameters (the
+fixed net: 0.19M). Same recipe: winners-only imitation, here of 120,000 bot
+games (3.35M positions), 25,000 steps from scratch with bfloat16 on the
+CPU's AMX units (`train_imitation.py --arch big --bf16`, about 1.6 hours).
+Step 20,000 is `connect5_big.pt`.
+
+Greedy against the three strongest Connect 5 bots (50 games each): 0.69
+(the standard net: 0.55).
+
+Round robin, Connect 5, 16 three-move openings with both colors (32 games
+per pair). Score of the row player against the column player:
+
+| | old | old+light | old+deep | big | big+light | big+deep |
+|---|---|---|---|---|---|---|
+| old | – | 0.33 | 0.23 | 0.31 | 0.25 | 0.20 |
+| old+light | 0.67 | – | 0.36 | 0.41 | 0.41 | 0.39 |
+| old+deep | 0.77 | 0.64 | – | 0.52 | 0.48 | 0.47 |
+| big | 0.69 | 0.59 | 0.48 | – | 0.41 | 0.38 |
+| big+light | 0.75 | 0.59 | 0.52 | 0.59 | – | 0.39 |
+| big+deep | 0.80 | 0.61 | 0.53 | 0.63 | 0.61 | – |
+
+old = `connect5_strong.pt`, big = `connect5_big.pt`; light = MCTS with 32
+simulations, deep = 128. Elo (old = 1000): big+deep 1231, old+deep 1194,
+big+light 1191, big 1155, old+light 1117. The big net alone is about as
+strong as the standard net with a deep search; with a deep search on both,
+the big net is only a little ahead (0.53 ± 0.07).
