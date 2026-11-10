@@ -28,10 +28,11 @@ def _score(args):
     torch.set_num_threads(1)
     from connectk.arena import make_openings, play_match
     from connectk.game import SPECS
-    from connectk.net import NetPlayer, load_net
+    from connectk.net import NetPlayer
+    from hidden.strong.bignet import load_model
     from hidden.strong.train_strong import panel
     spec = SPECS[game]
-    me = NetPlayer(load_net(spec, path), "net")
+    me = NetPlayer(load_model(spec, path), "net")
     ops = make_openings(spec, n_openings, plies=2, seed=31337)
     return path, {n: play_match(me, b, spec, ops).score for n, b in panel(spec, seed=4321).items()}
 

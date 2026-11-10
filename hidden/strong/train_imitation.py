@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from connectk.game import SPECS  # noqa: E402
 from connectk.net import ConnectNet, encode_relative, save_net  # noqa: E402
+from hidden.strong.bignet import BigConnectNet  # noqa: E402
 from hidden.strong.train_strong import evaluate  # noqa: E402
 
 
@@ -41,6 +42,8 @@ def main():
     ap.add_argument("--vf", type=float, default=0.5)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--save_every", type=int, default=5000)
+    ap.add_argument("--arch", default="small", choices=["small", "big"], help="big: hidden/strong/bignet.py")
+    ap.add_argument("--bf16", action="store_true", help="bfloat16 autocast (fast on CPUs with AMX)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -53,7 +56,10 @@ def main():
     print(f"{len(g)} positions from {len(parts)} files", flush=True)
     rng = np.random.default_rng(0)
     torch.manual_seed(0)
-    net = ConnectNet(spec)
+    net = BigConnectNet(spec) if args.arch == "big" else ConnectNet(spec)
+    print(f"{args.arch} network, {sum(p.numel() for p in net.parameters()):,} parameters", flush=True)
+    if args.bf16:
+        net = net.to(memory_format=torch.channels_last)
     if args.init:
         net.load_state_dict(torch.load(args.init, weights_only=True))
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
@@ -65,7 +71,12 @@ def main():
         flip = rng.random(args.batch) < 0.5
         gg = np.where(flip[:, None, None], gg[:, :, ::-1], gg)
         tt = np.where(flip[:, None], tt[:, ::-1], tt)
-        logits, v = net(torch.from_numpy(encode_relative(gg)))
+        x = torch.from_numpy(encode_relative(gg))
+        if args.bf16:
+            x = x.to(memory_format=torch.channels_last)
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=args.bf16):
+            logits, v = net(x)
+        logits, v = logits.float(), v.float()
         p_loss = -(torch.from_numpy(np.ascontiguousarray(tt)) * F.log_softmax(logits, -1)).sum(-1).mean()
         loss = p_loss + args.vf * F.mse_loss(v, torch.from_numpy(z[i]))
         opt.zero_grad()

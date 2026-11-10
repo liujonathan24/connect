@@ -11,7 +11,7 @@ hidden/strong/mcts.py with no root noise: it plays the most visited move.
 
 import numpy as np
 
-from connectk.net import load_net
+from hidden.strong.bignet import load_model
 from hidden.strong.mcts import run_mcts
 
 
@@ -24,7 +24,7 @@ class NeuralMCTS:
 
     @classmethod
     def load(cls, spec, path, sims=200, name=None):
-        return cls(load_net(spec, path), sims, name)
+        return cls(load_model(spec, path), sims, name)
 
     def choose(self, board):
         visits = run_mcts(self.net, [board], sims=self.sims, c_puct=self.c_puct, noise_frac=0.0)[0]
