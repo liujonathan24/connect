@@ -17,13 +17,26 @@ import torch
 from .net import load_net
 
 
-def net_entry(spec, path, label):
-    net = load_net(spec, path)
+def net_entry(spec, path, label, sims=None, short=None):
+    """One network for the page. `sims` = [light, strong] search sizes for this net (optional);
+    `short` = the text on its button (default: the game and board size)."""
+    try:
+        from hidden.strong.bignet import load_model     # our big nets, when the repo has them
+        net = load_model(spec, path)
+    except ImportError:
+        net = load_net(spec, path)
     tensors = {}
+    half = sum(t.numel() for t in net.state_dict().values()) > 1_000_000   # big nets: float16, half the page size
     for name, t in net.state_dict().items():
-        arr = t.detach().cpu().numpy().astype("<f4")
-        tensors[name] = {"shape": list(arr.shape), "data": base64.b64encode(arr.tobytes()).decode()}
-    return {"label": label, "spec": spec.name, "rows": spec.rows, "cols": spec.cols, "k": spec.k, "tensors": tensors}
+        arr = t.detach().cpu().numpy().astype("<f2" if half else "<f4")
+        tensors[name] = {"shape": list(arr.shape), "dtype": "f16" if half else "f32",
+                         "data": base64.b64encode(arr.tobytes()).decode()}
+    entry = {"label": label, "spec": spec.name, "rows": spec.rows, "cols": spec.cols, "k": spec.k, "tensors": tensors}
+    if sims:
+        entry["sims"] = list(sims)
+    if short:
+        entry["short"] = short
+    return entry
 
 
 def render_html(entries, title="Play Connect", standalone=True):
@@ -56,6 +69,14 @@ function specOf(n) {
     }
   return {R, C, K, wins, cellWins};
 }
+function halfToFloat(u) {
+  const out = new Float32Array(u.length);
+  for (let i = 0; i < u.length; i++) {
+    const h = u[i], sg = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, f = h & 1023;
+    out[i] = e === 0 ? sg * f * 5.960464477539063e-8 : e === 31 ? (f ? NaN : sg * Infinity) : sg * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+  return out;
+}
 function heightsOf(g, s) { const h = new Int32Array(s.C); for (let c = 0; c < s.C; c++) { let t = 0; for (let r = 0; r < s.R; r++) if (g[r * s.C + c]) t = r + 1; h[c] = t; } return h; }
 function winsAt(g, s, cell) {
   const p = g[cell];
@@ -84,15 +105,27 @@ function conv(inp, inC, H, W, w, b, outC, k) {
 function relu(a) { for (let i = 0; i < a.length; i++) if (a[i] < 0) a[i] = 0; return a; }
 function linear(x, w, b, out) { const n = x.length, y = new Float32Array(out); for (let o = 0; o < out; o++) { let s = b[o]; const ow = o * n; for (let i = 0; i < n; i++) s += w[ow + i] * x[i]; y[o] = s; } return y; }
 function forward(net, g, player, s) {
-  const R = s.R, C = s.C, HW = R * C, t = net.t, x = new Float32Array(4 * HW), h = heightsOf(g, s);
+  const R = s.R, C = s.C, HW = R * C, t = net.t, sh = net.sh, x = new Float32Array(4 * HW), h = heightsOf(g, s);
   for (let i = 0; i < HW; i++) { if (g[i] === player) x[i] = 1; else if (g[i] === 3 - player) x[HW + i] = 1; x[3 * HW + i] = 1; }
   for (let c = 0; c < C; c++) if (h[c] < R) x[2 * HW + h[c] * C + c] = 1;
-  let a = relu(conv(x, 4, R, C, t["body.0.weight"], t["body.0.bias"], 64, 3));
-  for (const L of [2, 4, 6, 8, 10]) a = relu(conv(a, 64, R, C, t[`body.${L}.weight`], t[`body.${L}.bias`], 64, 3));
-  const pc = relu(conv(a, 64, R, C, t["policy_conv.weight"], t["policy_conv.bias"], 2, 1));
+  let a, ch;
+  if (t["stem.weight"]) {                       // residual net (hidden/strong/bignet.py)
+    ch = sh["stem.weight"][0];
+    a = relu(conv(x, 4, R, C, t["stem.weight"], t["stem.bias"], ch, 3));
+    for (let b = 0; t[`blocks.${b}.c1.weight`]; b++) {
+      const y = relu(conv(a, ch, R, C, t[`blocks.${b}.c1.weight`], t[`blocks.${b}.c1.bias`], ch, 3));
+      const z = conv(y, ch, R, C, t[`blocks.${b}.c2.weight`], t[`blocks.${b}.c2.bias`], ch, 3);
+      for (let i = 0; i < a.length; i++) { const v = a[i] + z[i]; a[i] = v > 0 ? v : 0; }
+    }
+  } else {                                      // the fixed ConnectNet
+    ch = sh["body.0.weight"][0];
+    a = relu(conv(x, 4, R, C, t["body.0.weight"], t["body.0.bias"], ch, 3));
+    for (let L = 2; t[`body.${L}.weight`]; L += 2) a = relu(conv(a, ch, R, C, t[`body.${L}.weight`], t[`body.${L}.bias`], ch, 3));
+  }
+  const pc = relu(conv(a, ch, R, C, t["policy_conv.weight"], t["policy_conv.bias"], sh["policy_conv.weight"][0], 1));
   const logits = linear(pc, t["policy_fc.weight"], t["policy_fc.bias"], C);
-  const vc = relu(conv(a, 64, R, C, t["value_conv.weight"], t["value_conv.bias"], 1, 1));
-  const v1 = relu(linear(vc, t["value_fc1.weight"], t["value_fc1.bias"], 64));
+  const vc = relu(conv(a, ch, R, C, t["value_conv.weight"], t["value_conv.bias"], sh["value_conv.weight"][0], 1));
+  const v1 = relu(linear(vc, t["value_fc1.weight"], t["value_fc1.bias"], sh["value_fc1.weight"][0]));
   const value = Math.tanh(linear(v1, t["value_fc2.weight"], t["value_fc2.bias"], 1)[0]);
   return {logits, value, h};
 }
@@ -154,7 +187,9 @@ function mcts(net, g, player, s, sims) {
 onmessage = (e) => {
   const m = e.data;
   if (m.type === "load") {
-    for (const n of m.nets) { const t = {}; for (const k in n.tensors) t[k] = new Float32Array(n.tensors[k]); NETS[n.id] = {t, spec: specOf(n)}; }
+    for (const n of m.nets) { const t = {};
+      for (const k in n.tensors) t[k] = n.dtypes[k] === "f16" ? halfToFloat(new Uint16Array(n.tensors[k])) : new Float32Array(n.tensors[k]);
+      NETS[n.id] = {t, sh: n.shapes, spec: specOf(n)}; }
     postMessage({type: "ready"}); return;
   }
   const net = NETS[m.id], s = net.spec, g = Int8Array.from(m.grid), t0 = performance.now();
@@ -285,7 +320,10 @@ const LEVELS = [   // simulations per game size: [9 columns, 13 columns]
   {id: "light", label: "Net + light search", sims: [32, 16], hint: (n) => `A small search on top of the net (${n} simulations).`},
   {id: "strong", label: "Net + strong search", sims: [128, 64], hint: (n) => `The hard bot: the net with a ${n}-simulation search. A few seconds per move.`},
 ];
-function simsFor(level) { return level.sims[spec().cols > 9 ? 1 : 0]; }
+function simsFor(level) {   // a net may set its own [light, strong] sizes (a big net is slower in a browser)
+  const own = spec().sims; if (own && level.id !== "greedy") return own[level.id === "light" ? 0 : 1];
+  return level.sims[spec().cols > 9 ? 1 : 0];
+}
 function showHint() { const lv = LEVELS.find((l) => l.id === state.level); $("levelHint").textContent = lv.hint(simsFor(lv)); }
 const $ = (id) => document.getElementById(id);
 function b64ToBuf(b64) { const s = atob(b64), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }
@@ -391,7 +429,7 @@ $("undo").onclick = () => {
 };
 NETS.forEach((n, i) => {
   const l = document.createElement("label");
-  l.innerHTML = `<input type="radio" name="game" value="${i}" ${i === 0 ? "checked" : ""}><span>${n.spec.replace("connect", "Connect ")} (${n.cols}×${n.rows})</span>`;
+  l.innerHTML = `<input type="radio" name="game" value="${i}" ${i === 0 ? "checked" : ""}><span>${n.short || `${n.spec.replace("connect", "Connect ")} (${n.cols}×${n.rows})`}</span>`;
   l.querySelector("input").addEventListener("change", () => { state.net = i; showHint(); newGame(); });
   $("games").appendChild(l);
 });
@@ -405,6 +443,8 @@ showHint();
 for (const id of ["sideFirst", "sideSecond"]) $(id).addEventListener("change", (e) => { state.human = +e.target.value; newGame(); });
 resetState(); build(); render();
 worker.postMessage({type: "load", nets: NETS.map((n, i) => ({id: i, rows: n.rows, cols: n.cols, k: n.k,
+  shapes: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, t.shape])),
+  dtypes: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, t.dtype || "f32"])),
   tensors: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, b64ToBuf(t.data)]))}))});
 </script>"""
 
