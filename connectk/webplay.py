@@ -17,9 +17,15 @@ import torch
 from .net import load_net
 
 
-def net_entry(spec, path, label, sims=None, short=None):
-    """One network for the page. `sims` = [light, strong] search sizes for this net (optional);
-    `short` = the text on its button (default: the game and board size)."""
+def net_entry(spec, path, label, sims=None, short=None, play_sims=None, play_sims_cpu=None):
+    """One network for the page.
+
+    sims           [light, strong] search sizes shown for this net (optional)
+    short          the text on its button (default: the game and board size)
+    play_sims      if set, the net plays with this search size at every level,
+                   whatever the buttons say
+    play_sims_cpu  the same, used instead when the browser has no WebGL
+    """
     try:
         from hidden.strong.bignet import load_model     # our big nets, when the repo has them
         net = load_model(spec, path)
@@ -36,11 +42,22 @@ def net_entry(spec, path, label, sims=None, short=None):
         entry["sims"] = list(sims)
     if short:
         entry["short"] = short
+    if play_sims is not None:
+        entry["play_sims"] = int(play_sims)
+        entry["play_sims_cpu"] = int(play_sims if play_sims_cpu is None else play_sims_cpu)
     return entry
 
 
-def render_html(entries, title="Play Connect", standalone=True):
+TFJS = "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"
+
+
+def render_html(entries, title="Play Connect", standalone=True, gpu=False):
+    """gpu=True loads TensorFlow.js and runs the nets with WebGL when the browser has it
+    (many times faster for big nets); without WebGL the page uses its plain JavaScript."""
     page = _TEMPLATE.replace("__TITLE__", title).replace("__NETS__", json.dumps(entries, separators=(",", ":")))
+    page = page.replace("__GPU__", "true" if gpu else "false")
+    if gpu:
+        page = page.replace("<script>\nconst NETS", f'<script src="{TFJS}"></script>\n<script>\nconst NETS', 1)
     if standalone:
         page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
                 '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
@@ -48,15 +65,14 @@ def render_html(entries, title="Play Connect", standalone=True):
     return page
 
 
-def write_html(entries, path, title="Play Connect", standalone=True):
+def write_html(entries, path, title="Play Connect", standalone=True, gpu=False):
     with open(path, "w") as f:
-        f.write(render_html(entries, title, standalone))
+        f.write(render_html(entries, title, standalone, gpu))
     return path
 
 
-# The worker: board rules, the network forward pass, tactics and MCTS.
-_WORKER = r"""
-let NETS = {};
+# Shared by the worker and the page: board rules, the network forward pass, tactics and MCTS.
+_LIB = r"""
 function specOf(n) {
   const R = n.rows, C = n.cols, K = n.k, wins = [], cellWins = Array.from({length: R * C}, () => []);
   for (let r = 0; r < R; r++) for (let c = 0; c < C; c++)
@@ -145,10 +161,10 @@ function tactics(g, s, h, p) {
     const dbl = winCells(g, s, h, p) >= 2 && winCells(g, s, h, 3 - p) === 0; h[c]--; g[cell] = 0; if (dbl) return 1; }
   return 0;
 }
-// ---- MCTS
+// ---- MCTS (async, so the same code runs with a plain or a GPU evaluator)
 function Node(g, player, s, done, winner) { this.g = g; this.p = player; this.done = done; this.winner = winner; this.P = null; this.N = null; this.W = null; this.ch = null; }
-function expand(node, net, s) {
-  const {logits, value, h} = forward(net, node.g, node.p, s);
+async function expand(node, evalFn, s) {
+  const {logits, value, h} = await evalFn(node.g, node.p);
   const P = new Float32Array(s.C); let m = -Infinity;
   for (let c = 0; c < s.C; c++) if (h[c] < s.R) m = Math.max(m, logits[c]);
   let z = 0; for (let c = 0; c < s.C; c++) if (h[c] < s.R) { P[c] = Math.exp(logits[c] - m); z += P[c]; }
@@ -164,10 +180,11 @@ function child(node, a, s) {
   for (let c = 0; c < s.C; c++) if ((c === a ? node.h[c] + 1 : node.h[c]) < s.R) { full = false; break; }
   return (node.ch[a] = new Node(g, 3 - node.p, s, won || full, won ? node.p : 0));
 }
-function mcts(net, g, player, s, sims) {
+async function mcts(evalFn, g, player, s, sims, deadline = Infinity, minSims = 0) {
   const root = new Node(g, player, s, false, 0);
-  const rootValue = expand(root, net, s);
+  const rootValue = await expand(root, evalFn, s);
   for (let i = 0; i < sims; i++) {
+    if (i >= minSims && performance.now() > deadline) break;      // out of time: play the best move so far
     let node = root; const path = [];
     while (node.P && !node.done) {
       let tot = 0, wsum = 0; for (let c = 0; c < s.C; c++) { tot += node.N[c]; wsum += node.W[c]; }
@@ -178,13 +195,24 @@ function mcts(net, g, player, s, sims) {
         if (q + u > bs) { bs = q + u; best = c; } }
       path.push([node, best]); node = child(node, best, s);
     }
-    let v = node.done ? (node.winner ? -1 : 0) : expand(node, net, s);
+    let v = node.done ? (node.winner ? -1 : 0) : await expand(node, evalFn, s);
     for (let j = path.length - 1; j >= 0; j--) { v = -v; const [n, a] = path[j]; n.N[a] += 1; n.W[a] += v; }
   }
   let best = 0; for (let c = 1; c < s.C; c++) if (root.N[c] > root.N[best]) best = c;
   return {move: best, value: rootValue, visits: Array.from(root.N)};
 }
-onmessage = (e) => {
+async function chooseMove(evalFn, g, player, s, sims, budgetMs = Infinity, minSims = 0) {
+  if (sims > 0) return mcts(evalFn, g, player, s, sims, performance.now() + budgetMs, minSims);
+  const {logits, value, h} = await evalFn(g, player);
+  let best = -1; for (let c = 0; c < s.C; c++) if (h[c] < s.R && (best < 0 || logits[c] > logits[best])) best = c;
+  return {move: best, value};
+}
+"""
+
+# The worker: the plain JavaScript path (no GPU).
+_WORKER = _LIB + r"""
+let NETS = {};
+onmessage = async (e) => {
   const m = e.data;
   if (m.type === "load") {
     for (const n of m.nets) { const t = {};
@@ -192,15 +220,9 @@ onmessage = (e) => {
       NETS[n.id] = {t, sh: n.shapes, spec: specOf(n)}; }
     postMessage({type: "ready"}); return;
   }
-  const net = NETS[m.id], s = net.spec, g = Int8Array.from(m.grid), t0 = performance.now();
-  if (m.sims <= 0) {
-    const {logits, value, h} = forward(net, g, m.player, s);
-    let best = -1; for (let c = 0; c < s.C; c++) if (h[c] < s.R && (best < 0 || logits[c] > logits[best])) best = c;
-    postMessage({type: "move", move: best, value, ms: performance.now() - t0, req: m.req});
-  } else {
-    const r = mcts(net, g, m.player, s, m.sims);
-    postMessage({type: "move", move: r.move, value: r.value, visits: r.visits, ms: performance.now() - t0, req: m.req});
-  }
+  const net = NETS[m.id], s = net.spec, t0 = performance.now();
+  const r = await chooseMove((g, p) => forward(net, g, p, s), Int8Array.from(m.grid), m.player, s, m.sims, m.budgetMs ?? Infinity, m.minSims ?? 0);
+  postMessage({type: "move", move: r.move, value: r.value, ms: performance.now() - t0, req: m.req});
 };
 """
 
@@ -315,6 +337,8 @@ button:focus-visible { outline: 3px solid var(--p2); outline-offset: 2px; }
 <script>
 const NETS = __NETS__;
 const WORKER_SRC = __WORKER__;
+const LIB = new Function(__LIB__ + "; return {specOf, heightsOf, halfToFloat, chooseMove};")();
+const USE_GPU = __GPU__;
 const LEVELS = [   // simulations per game size: [9 columns, 13 columns]
   {id: "greedy", label: "Net only", sims: [0, 0], hint: () => "The net's top move, no search. This is how graders play a submission."},
   {id: "light", label: "Net + light search", sims: [32, 16], hint: (n) => `A small search on top of the net (${n} simulations).`},
@@ -324,11 +348,15 @@ function simsFor(level) {   // a net may set its own [light, strong] sizes (a bi
   const own = spec().sims; if (own && level.id !== "greedy") return own[level.id === "light" ? 0 : 1];
   return level.sims[spec().cols > 9 ? 1 : 0];
 }
+function playSims(level) {  // what the net really plays with: a net's play_sims overrides every level
+  const n = spec();
+  if (n.play_sims !== undefined) return gpu ? n.play_sims : (n.play_sims_cpu ?? n.play_sims);
+  return simsFor(level);
+}
 function showHint() { const lv = LEVELS.find((l) => l.id === state.level); $("levelHint").textContent = lv.hint(simsFor(lv)); }
 const $ = (id) => document.getElementById(id);
 function b64ToBuf(b64) { const s = atob(b64), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }
-const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: "text/javascript"})));
-let ready = false, req = 0;
+let worker = null, gpu = null, ready = false, req = 0;
 const state = {net: 0, level: "strong", human: 1, g: null, h: null, player: 1, moves: [], winner: 0, winLine: [], busy: false, lastEval: null};
 function spec() { return NETS[state.net]; }
 function resetState() {
@@ -394,16 +422,83 @@ function render(animateLast) {
 function maybeNet() {
   if (!ready || state.winner || state.player === state.human) return;
   state.busy = true; render();
-  const level = LEVELS.find((l) => l.id === state.level), id = ++req;
-  setTimeout(() => worker.postMessage({type: "move", id: state.net, grid: Array.from(state.g), player: state.player, sims: simsFor(level), req: id}), 30);
+  const level = LEVELS.find((l) => l.id === state.level), id = ++req, sims = playSims(level);
+  // a search stops after about 6 s (slow machine, software WebGL), with at least 16 simulations
+  const minSims = Math.min(sims, spec().play_sims_cpu ?? 16), budgetMs = 6000;
+  if (gpu) {
+    const net = gpu[state.net], g = state.g.slice(), player = state.player;
+    setTimeout(async () => { const r = await LIB.chooseMove(net.evalFn, g, player, net.spec, sims, budgetMs, minSims); onMove({...r, req: id}); }, 30);
+  } else {
+    setTimeout(() => worker.postMessage({type: "move", id: state.net, grid: Array.from(state.g), player: state.player, sims, budgetMs, minSims, req: id}), 30);
+  }
 }
-worker.onerror = (e) => { $("status").textContent = "The network could not start: " + (e.message || "unknown error"); };
-worker.onmessage = (e) => {
-  const m = e.data;
-  if (m.type === "ready") { ready = true; newGame(); return; }
+function onMove(m) {
   if (m.req !== req) return;
   state.busy = false; state.lastEval = m.value; play(m.move); render(true);
-};
+}
+// ---- the GPU path: TensorFlow.js with WebGL, on the page's own thread
+function tfWeights(t, sh) {
+  const W = {};
+  for (const k in t) {
+    const s = sh[k];
+    if (s.length === 4) W[k] = tf.tensor4d(t[k], s).transpose([2, 3, 1, 0]);      // OIHW -> HWIO
+    else if (s.length === 2) W[k] = tf.tensor2d(t[k], s).transpose();            // [out, in] -> [in, out]
+    else W[k] = tf.tensor1d(t[k]);
+  }
+  return W;
+}
+function tfForward(W, x) {
+  return tf.tidy(() => {
+    const conv = (a, k) => tf.conv2d(a, W[k + ".weight"], 1, "same").add(W[k + ".bias"]);
+    const flat = (h) => h.transpose([0, 3, 1, 2]).reshape([h.shape[0], -1]);     // the order of torch's flatten
+    let a;
+    if (W["stem.weight"]) {
+      a = conv(x, "stem").relu();
+      for (let b = 0; W[`blocks.${b}.c1.weight`]; b++) a = a.add(conv(conv(a, `blocks.${b}.c1`).relu(), `blocks.${b}.c2`)).relu();
+    } else {
+      a = conv(x, "body.0").relu();
+      for (let L = 2; W[`body.${L}.weight`]; L += 2) a = conv(a, `body.${L}`).relu();
+    }
+    const logits = flat(conv(a, "policy_conv").relu()).matMul(W["policy_fc.weight"]).add(W["policy_fc.bias"]);
+    const v1 = flat(conv(a, "value_conv").relu()).matMul(W["value_fc1.weight"]).add(W["value_fc1.bias"]).relu();
+    return tf.concat([logits, v1.matMul(W["value_fc2.weight"]).add(W["value_fc2.bias"]).tanh()], 1);
+  });
+}
+function tfEvaluator(W, s) {
+  return async (g, player) => {
+    const R = s.R, C = s.C, h = LIB.heightsOf(g, s), x = new Float32Array(R * C * 4);
+    for (let i = 0; i < R * C; i++) { if (g[i] === player) x[i * 4] = 1; else if (g[i] === 3 - player) x[i * 4 + 1] = 1; x[i * 4 + 3] = 1; }
+    for (let c = 0; c < C; c++) if (h[c] < R) x[(h[c] * C + c) * 4 + 2] = 1;
+    const xin = tf.tensor4d(x, [1, R, C, 4]), out = tfForward(W, xin), d = await out.data();
+    xin.dispose(); out.dispose();
+    return {logits: d.subarray(0, C), value: d[C], h};
+  };
+}
+function decoded(n) {
+  const t = {}, sh = {};
+  for (const k in n.tensors) { const buf = b64ToBuf(n.tensors[k].data); sh[k] = n.tensors[k].shape;
+    t[k] = n.tensors[k].dtype === "f16" ? LIB.halfToFloat(new Uint16Array(buf)) : new Float32Array(buf); }
+  return {t, sh};
+}
+async function startGpu() {
+  if (!USE_GPU || !window.tf) return null;
+  try {
+    await tf.setBackend("webgl"); await tf.ready();
+    if (tf.getBackend() !== "webgl") return null;
+    const nets = NETS.map((n) => { const d = decoded(n), s = LIB.specOf(n); return {spec: s, evalFn: tfEvaluator(tfWeights(d.t, d.sh), s)}; });
+    for (const n of nets) await n.evalFn(new Int8Array(n.spec.R * n.spec.C), 1);    // compile the shaders now, not on the first move
+    return nets;
+  } catch (e) { return null; }
+}
+function startWorker() {
+  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: "text/javascript"})));
+  worker.onerror = (e) => { $("status").textContent = "The network could not start: " + (e.message || "unknown error"); };
+  worker.onmessage = (e) => { if (e.data.type === "ready") { ready = true; newGame(); } else onMove(e.data); };
+  worker.postMessage({type: "load", nets: NETS.map((n, i) => ({id: i, rows: n.rows, cols: n.cols, k: n.k,
+    shapes: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, t.shape])),
+    dtypes: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, t.dtype || "f32"])),
+    tensors: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, b64ToBuf(t.data)]))}))});
+}
 $("board").addEventListener("click", (e) => {
   const cell = e.target.closest(".cell"); if (!cell || state.busy || state.winner || state.player !== state.human) return;
   if (play(+cell.dataset.col)) { render(true); maybeNet(); }
@@ -442,10 +537,7 @@ LEVELS.forEach((lv) => {
 showHint();
 for (const id of ["sideFirst", "sideSecond"]) $(id).addEventListener("change", (e) => { state.human = +e.target.value; newGame(); });
 resetState(); build(); render();
-worker.postMessage({type: "load", nets: NETS.map((n, i) => ({id: i, rows: n.rows, cols: n.cols, k: n.k,
-  shapes: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, t.shape])),
-  dtypes: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, t.dtype || "f32"])),
-  tensors: Object.fromEntries(Object.entries(n.tensors).map(([k, t]) => [k, b64ToBuf(t.data)]))}))});
+startGpu().then((nets) => { gpu = nets; if (gpu) { ready = true; newGame(); } else startWorker(); });
 </script>"""
 
-_TEMPLATE = _TEMPLATE.replace("__WORKER__", json.dumps(_WORKER))
+_TEMPLATE = _TEMPLATE.replace("__WORKER__", json.dumps(_WORKER)).replace("__LIB__", json.dumps(_LIB))
