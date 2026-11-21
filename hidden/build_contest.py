@@ -16,11 +16,45 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # --------------------------------------------------------------------------- shared cells
 
-SETUP = r'''
-import pathlib, zipfile
-if not pathlib.Path("connectk").exists():          # first run: unpack the code next to this notebook
+INSTALL_MD = r"""
+## 0. Install
+
+Run the next cell once. It unpacks `connect5.zip` next to this notebook and
+installs the packages it needs (`numpy`, `torch`, `matplotlib`) into this
+notebook's own Python. Packages you already have are skipped, so on Google
+Colab it takes a few seconds.
+
+* **Google Colab:** run the cell; if `connect5.zip` is not uploaded yet, the cell
+  shows an upload button. For a GPU: *Runtime → Change runtime type → GPU*.
+* **Your own machine:** put `connect5.zip` next to this notebook. A fresh
+  environment is best: `python3 -m venv .venv`, activate it, then
+  `pip install jupyter` and start Jupyter from it. Python 3.10 or newer.
+* **No GPU, and no torch yet?** On Linux, a plain `pip install torch` downloads
+  the large CUDA build. Install the small CPU build first:
+  `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+"""
+
+INSTALL = r'''
+import pathlib, sys, zipfile
+assert sys.version_info >= (3, 10), f"Python 3.10 or newer is needed (this is {sys.version.split()[0]})"
+
+if not pathlib.Path("connectk").exists():                  # first run: unpack the code next to this notebook
+    if not pathlib.Path("connect5.zip").exists():
+        try:
+            from google.colab import files                 # on Colab: upload it now
+            print("Choose connect5.zip:")
+            files.upload()
+        except ImportError:
+            raise FileNotFoundError("Put connect5.zip next to this notebook, then run this cell again.")
     zipfile.ZipFile("connect5.zip").extractall(".")
 
+%pip install -q -r requirements.txt
+import numpy, torch
+print("Python", sys.version.split()[0], "| numpy", numpy.__version__, "| torch", torch.__version__,
+      "| GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")
+'''
+
+SETUP = r'''
 import copy, dataclasses, json, shutil, time
 import numpy as np
 import torch
@@ -225,6 +259,8 @@ twice, once with each color. Win 1, draw 0.5, loss 0. Your score is the mean.
 
 **Reading:** [Reinforcement learning fundamentals](https://medium.com/@812jugalgajjar/reinforcement-learning-fundamentals-understanding-the-framework-42963a7a5b40)
 """)
+    md(c, INSTALL_MD)
+    code(c, INSTALL)
     code(c, SETUP, **S)
     md(c, r"""
 ## 1. The game
@@ -479,6 +515,8 @@ from your network, 1 second per move on one CPU core).
 
 **Reading:** [Self-play (Hugging Face Deep RL course)](https://huggingface.co/learn/deep-rl-course/en/unit7/self-play)
 """)
+    md(c, INSTALL_MD)
+    code(c, INSTALL)
     code(c, SETUP, **S)
     code(c, r'''
 gauges = load_packed("bots.bin", "connect6_gauges", seed=0)    # easy6, hard6: only to measure progress

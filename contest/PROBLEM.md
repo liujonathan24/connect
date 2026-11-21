@@ -25,10 +25,17 @@ board is a draw.
 | `notebook_a.ipynb` | Part a: a network template, PPO training against the bots, evaluation, replays, hand-in |
 | `notebook_b.ipynb` | Part b: self-play training, a tournament harness for your versions, scrimmages, hand-in |
 
-**Setup.** Put `connect5.zip` next to the notebooks; the first cell of each
-notebook unpacks it. On your own machine: `pip install -r requirements.txt
-jupyter`. On Google Colab: upload `connect5.zip` together with the notebook,
-and choose a GPU runtime if you have one.
+**Setup.** Open a notebook and run its first cell ("0. Install"): it unpacks
+`connect5.zip` and installs the packages (`numpy`, `torch`, `matplotlib`) into
+the notebook's own Python.
+
+* **Google Colab:** open the notebook, run the first cell, and upload
+  `connect5.zip` when it asks. For a GPU: *Runtime → Change runtime type → GPU*.
+* **Your own machine** (Python 3.10 or newer): put `connect5.zip` next to the
+  notebooks, then for example
+  `python3 -m venv .venv && source .venv/bin/activate && pip install jupyter && jupyter notebook`.
+  Without a GPU, install the small CPU build of torch first:
+  `pip install torch --index-url https://download.pytorch.org/whl/cpu`.
 
 Useful commands (after unpacking):
 
