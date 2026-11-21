@@ -29,6 +29,7 @@ RENAME = {
 }
 
 TARGETS = {
+    "contest/bots.bin": ["connect5_bots", "connect6_gauges"],
     "part_a_connect6/opponents.bin": ["connect6_public"],
     "part_b_connect5/gauges.bin": ["connect5_gauges"],
 }

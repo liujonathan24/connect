@@ -1,11 +1,11 @@
-"""The fixed network. Every team uses this exact architecture and input encoding.
+"""ConnectNet: a small reference network, and the standard input encoding.
 
-You may change the weights, nothing else. The graders build `ConnectNet(spec)`,
-load your state_dict with strict=True, and play the move
-
-    argmax over legal columns of policy_logits
-
-with no search and no randomness. So the network alone is your player.
+The command-line tools use it (`play --vs my.pt`, `watch`, `webplay`), and
+some versions of this problem fix it for every team (their PROBLEM.md says
+so). There, you choose the weights only: the graders build `ConnectNet(spec)`,
+load your state_dict with strict=True, and play the argmax legal column of
+the policy logits, with no search. Where the network is free (the contest's
+notebooks), your own model.py defines it instead.
 
 Input: 4 planes of shape (rows, cols), from the view of the side to move.
     plane 0   stones of the side to move

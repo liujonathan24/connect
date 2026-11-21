@@ -46,3 +46,23 @@ def connect5_anchors(seed=None):
                                          defense=[0, 1, 4, 16, 64, 0], temperature=0.2),
         "anchor_search": SearchBot("anchor_search", s(3), depth=2, noise=0.05),
     }
+
+
+A5 = [0, 1, 4, 16, 64, 256]
+
+
+def connect5_heldout(seed=None):
+    """Contest Part a: the rule-based held-out bots. The grader adds our trained nets."""
+    s = lambda i: _s(seed, 200 + i)  # noqa: E731
+    return [
+        HeuristicBot("c5_sloppy", s(1), epsilon=0.5, p_block=0.5, temperature=1.0),
+        HeuristicBot("c5_novice", s(2), epsilon=0.15, p_block=0.75, avoid_gift=False, temperature=0.7),
+        HeuristicBot("c5_stacker", s(3), stack=3.0, low=0.5, center=0.0, p_block=0.9),
+        HeuristicBot("c5_edge", s(4), center=-6.0, epsilon=0.05),
+        HeuristicBot("c5_rusher", s(5), attack=[0, 1, 8, 64, 512, 4096], defense=[0, 0, 0.5, 2, 10, 0], avoid_gift=False),
+        HeuristicBot("c5_balanced", s(6), attack=A5, defense=[0, 1, 4, 16, 64, 0], temperature=0.3),
+        HeuristicBot("c5_turtle", s(7), attack=[0, 0.5, 2, 6, 20, 60], defense=[0, 3, 12, 48, 192, 0], lookahead=0.3),
+        HeuristicBot("c5_planner", s(8), attack=A5, defense=[0, 1.2, 5, 20, 80, 0], lookahead=0.8),
+        SearchBot("c5_search", s(9), depth=2, noise=0.1),
+        SearchBot("c5_search_def", s(10), depth=2, defense_ratio=1.6, noise=0.1),
+    ]

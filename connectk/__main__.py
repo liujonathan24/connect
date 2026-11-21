@@ -6,6 +6,7 @@
     python3 -m connectk tournament runs/*.pt --game connect5 --workers 4
     python3 -m connectk watch a.pt b.pt --game connect5 --out replay.html
     python3 -m connectk webplay my.pt --game connect5 --out play.html   # play your net in a browser
+    python3 -m connectk check my_submission --game connect5            # check a submission folder
 
 Where a player is asked for, give a .pt file (a network, played greedily),
 "random", or a name from a packed bot file given with --bots
@@ -118,6 +119,12 @@ def cmd_webplay(args):
     print(f"wrote {args.out}; open it in a browser and play")
 
 
+def cmd_check(args):
+    from .agents import check
+    report = check(args.folder, SPECS[args.game])
+    sys.exit(0 if report["ok"] else 1)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="python3 -m connectk", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -163,6 +170,11 @@ def main():
     p.add_argument("--out", default="play.html")
     p.add_argument("--title", default="Play Connect")
     p.set_defaults(func=cmd_webplay)
+
+    p = sub.add_parser("check", help="check a submission folder (agent.py) against the rules")
+    p.add_argument("folder")
+    p.add_argument("--game", default="connect5", choices=sorted(SPECS))
+    p.set_defaults(func=cmd_check)
 
     args = ap.parse_args()
     args.func(args)
