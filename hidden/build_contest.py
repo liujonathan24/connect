@@ -674,7 +674,9 @@ net, pool, version = train(cfg, Net(**NET_CONFIG).to(device))
 Every saved version plays every other version and the two gauges, on the same
 openings, with both colors. You get points, Elo ratings (`easy6` fixed at 1000)
 and the score matrix. Read the matrix, not only the Elo: in self-play, version A
-can beat B, B beat C, and C beat A.
+can beat B, B beat C, and C beat A. After the short default run, expect a noisy
+table where later versions do not always beat earlier ones (not even `v0`). That
+is the problem to solve.
 """)
     code(c, r'''
 def load_versions(every=1):

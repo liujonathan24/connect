@@ -1,17 +1,40 @@
 # Connect 5 / Connect 6: an RL hackathon problem
 
-Teams train a neural network to play Connect-k with gravity: the rules of
+Teams train neural networks to play Connect-k with gravity: the rules of
 Connect 4 on a bigger board, with a longer line to win.
 
-| Part | Game | Task | Result |
-|---|---|---|---|
-| A | Connect 6, 13 × 13 | Online RL against 4 given bots (one of them cheats), a broken PPO trainer, optional poisoned offline games | Score against held-out bots |
-| B | Connect 5, 9 × 9 | Self-play, with a notebook and a tournament harness for past versions | Placement in a tournament between all teams |
+## The contest version (`contest/`)
 
-In both parts the network is fixed (`connectk/net.py`): every team trains the
-same architecture with the same input encoding, and only hands in weights.
-At test time the network plays greedily (the legal column with the highest
-policy logit) with no search.
+The problem as written in `contest/PROBLEM.md`:
+
+| Part | Game | Task | Points |
+|---|---|---|---|
+| a | Connect 5, 9 × 9 | Train a network (any design, under 200M parameters) to beat bots; four bots given | 5T × score against held-out bots |
+| b | Connect 6, 13 × 13 | Self-play; play the other teams | 10T × score in a round robin between teams |
+
+A submission is a folder with `agent.py` (`make_agent(folder)` returns an
+object with `.net` and `.choose(board)`); 1 second per move on one CPU core.
+
+```sh
+python3 hidden/make_contest.py ~/contest-handout      # connect5.zip, notebook_a.ipynb, notebook_b.ipynb, PROBLEM.md
+# ... teams work, then hand in submission_a/ and submission_b/ ...
+python3 hidden/graders/contest/grade_a.py --workers 32 teams/*/submission_a
+python3 hidden/graders/contest/tournament_b.py --workers 32 --reference teams/*/submission_b
+```
+
+Our trained networks are held out completely: they play only inside the
+graders (Part a's hardest held-out bots, Part b's non-counting reference),
+and the handout builder refuses to package them. Submissions are code: run
+the graders in a sandbox (a container without network access).
+
+Reference points (Part a, `grade_a.py`): the notebook template after its
+2-minute default run scores 0.055; our standard net, greedy, scores 0.601.
+
+## The earlier version (`part_a_connect6/`, `part_b_connect5/`)
+
+Also complete: Part A plays Connect 6 against four given bots, one of which
+cheats, with a broken PPO baseline and poisoned offline data; Part B is Connect
+5 self-play. Every team uses one fixed network. Details below.
 
 ## The game
 

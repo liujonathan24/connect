@@ -3,6 +3,11 @@
 Keep this folder away from teams. `make_handout.py` never copies it.
 
 ```
+make_contest.py                 makes the contest handout (connect5.zip, notebooks, PROBLEM.md)
+build_contest.py                writes contest/notebook_a.ipynb and notebook_b.ipynb (edit cells there)
+graders/contest/grade_a.py      contest Part a: submissions against the held-out Connect 5 bots and our nets
+graders/contest/tournament_b.py contest Part b: round robin between teams' Connect 6 bots
+solutions/contest/ref_a, ref_b  reference submissions (our standard nets, greedy) to check the graders
 make_handout.py                 makes the clean folder for Part A or Part B
 graders/part_a/grade.py         scores Part A submissions against the held-out bots
 graders/part_b/final_tournament.py   the Part B final: all teams + anchors, round robin
