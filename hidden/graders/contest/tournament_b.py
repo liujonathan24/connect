@@ -8,8 +8,9 @@ each color). Win 1, draw 0.5, loss 0. S_b = a team's mean score over its
 games against other teams; points = 10T x S_b.
 
 --reference also lets our Connect 6 net (hidden/strong/connect6_strong.pt)
-play every team, greedy and with a 64-simulation MCTS. Those games are shown
-for reference and do NOT count in S_b.
+play every team, greedy and with a 64-simulation MCTS, and a test-solve by
+another agent (hidden/heldout_bots/team_az/submission_b, its own MCTS).
+Those games are shown for reference and do NOT count in S_b.
 
 Time: a Connect 6 game lasts up to 169 moves. With slow bots (1 s per move)
 a pair of teams needs about 30 minutes per opening pair; use many workers.
@@ -19,7 +20,7 @@ import argparse
 import itertools
 import json
 
-from common import STRONG, run_jobs, team_name  # noqa: F401
+from common import HELDOUT_BOTS, STRONG, run_jobs, team_name  # noqa: F401
 
 from connectk.arena import make_openings  # noqa: E402
 from connectk.game import CONNECT6  # noqa: E402
@@ -47,7 +48,8 @@ def main():
     refs = {}
     if args.reference:
         refs = {"ref_net": ("net", str(STRONG / "connect6_strong.pt"), 0, "ref_net"),
-                "ref_net_search": ("net", str(STRONG / "connect6_strong.pt"), 64, "ref_net_search")}
+                "ref_net_search": ("net", str(STRONG / "connect6_strong.pt"), 64, "ref_net_search"),
+                "ref_team_az": ("agent", str(HELDOUT_BOTS / "team_az/submission_b"), "ref_team_az")}
     openings = make_openings(CONNECT6, args.openings, plies=2, seed=OPENING_SEED)
     folders = list(teams)
     jobs = [(("team", a), ("team", b), "connect6", openings) for a, b in itertools.combinations(folders, 2)]
@@ -60,7 +62,7 @@ def main():
     timeouts, seconds, moves = np.zeros(len(names)), np.zeros(len(names)), np.zeros(len(names))
     for a_ref, b_ref, stats, err in run_jobs(jobs, args.workers):
         a = teams[a_ref[1]]
-        b = teams[b_ref[1]] if b_ref[0] == "team" else b_ref[3]
+        b = teams[b_ref[1]] if b_ref[0] == "team" else (b_ref[2] if b_ref[0] == "agent" else b_ref[3])
         if err:          # a crashing bot loses every game of the pair
             n = 2 * len(openings)
             stats = {"wins": 0, "draws": 0, "losses": n, "timeouts": 0}

@@ -1,0 +1,16 @@
+{
+ "rows": 13,
+ "cols": 13,
+ "k": 6,
+ "net": {
+  "channels": 48,
+  "blocks": 5,
+  "vhead": "pool",
+  "planes": 10
+ },
+ "time_limit": 0.75,
+ "batch": 8,
+ "c_puct": 1.8,
+ "fpu_red": 0.25,
+ "solver": true
+}

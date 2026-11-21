@@ -8,7 +8,7 @@ import textwrap
 import unittest
 import zipfile
 
-from connectk import CONNECT5, Board
+from connectk import CONNECT5, CONNECT6, Board
 from connectk.agents import MoveTimeout, TimedAgent, count_parameters, load_agent
 from connectk.arena import RandomPlayer, play_game
 
@@ -70,6 +70,23 @@ class TestSubmissions(unittest.TestCase):
         self.assertEqual(g.winner, 2)
         self.assertTrue(g.reason.startswith("error: MoveTimeout"))
         self.assertTrue(issubclass(MoveTimeout, Exception))
+
+
+class TestHeldoutBots(unittest.TestCase):
+    def test_team_az_loads_and_plays(self):
+        for part, spec in (("a", CONNECT5), ("b", CONNECT6)):
+            agent = load_agent(ROOT / f"hidden/heldout_bots/team_az/submission_{part}")
+            board = Board(spec)
+            board.play(spec.cols // 2)
+            self.assertTrue(board.is_legal(agent.choose(board.copy())))
+            self.assertLess(count_parameters(agent), 1_000_000)
+
+    def test_graders_list_the_new_hardest_bot(self):
+        sys.path.insert(0, str(ROOT / "hidden/graders/contest"))
+        from grade_a import heldout_refs
+        refs = heldout_refs()
+        self.assertEqual(refs["n_team_az"][0], "agent")
+        self.assertEqual(len(refs), 14)
 
 
 class TestHandout(unittest.TestCase):

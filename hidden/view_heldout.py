@@ -38,7 +38,9 @@ ABOUT = {
     "c5_search_def": "alpha-beta 2 deep, weighs the opponent's lines more (strong)",
     "n_standard": "our standard net (0.19M parameters), greedy",
     "n_big": "our big net (2.1M parameters), greedy",
-    "n_big_search": "our big net with a 64-simulation MCTS (the hardest bot)",
+    "n_big_search": "our big net with a 64-simulation MCTS",
+    "n_team_az": "a test-solve by another agent: 0.5M-parameter net + its own MCTS, 0.75 s per move (the hardest bot)",
+    "ref_team_az": "the same agent's Connect 6 test-solve: 0.2M-parameter net + its own MCTS",
     "ref_net": "our Connect 6 net (0.2M parameters), greedy",
     "ref_net_search": "our Connect 6 net with a 64-simulation MCTS",
 }
@@ -50,12 +52,22 @@ def pools():
     c5 = {b.name: (lambda n=b.name: {x.name: x for x in connect5_heldout(77)}[n]) for b in connect5_heldout(77)}
     c5_nets = {"n_standard": ("connect5_strong.pt", 0), "n_big": ("connect5_big.pt", 0), "n_big_search": ("connect5_big.pt", 64)}
     c6_nets = {"ref_net": ("connect6_strong.pt", 0), "ref_net_search": ("connect6_strong.pt", 64)}
+    c5_n = {n: (lambda n=n, v=v: net_player("connect5", *v, n)) for n, v in c5_nets.items()}
+    c5_n["n_team_az"] = lambda: team_player("team_az/submission_a", "n_team_az")
+    c6_n = {n: (lambda n=n, v=v: net_player("connect6", *v, n)) for n, v in c6_nets.items()}
+    c6_n["ref_team_az"] = lambda: team_player("team_az/submission_b", "ref_team_az")
     return {
-        "connect5": {"Part a: held-out rule-based bots": c5,
-                     "Part a: held-out nets": {n: (lambda n=n, v=v: net_player("connect5", *v, n)) for n, v in c5_nets.items()}},
-        "connect6": {"Part b: reference nets (not counted in S_b)":
-                     {n: (lambda n=n, v=v: net_player("connect6", *v, n)) for n, v in c6_nets.items()}},
+        "connect5": {"Part a: held-out rule-based bots": c5, "Part a: held-out nets": c5_n},
+        "connect6": {"Part b: reference bots (not counted in S_b)": c6_n},
     }
+
+
+def team_player(rel, name):
+    """A held-out bot in the submission format (hidden/heldout_bots/)."""
+    from connectk.agents import load_agent
+    agent = load_agent(ROOT / "hidden/heldout_bots" / rel)
+    agent.name = name
+    return agent
 
 
 def net_player(game, weights, sims, name):

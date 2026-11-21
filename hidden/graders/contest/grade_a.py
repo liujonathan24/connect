@@ -12,13 +12,15 @@ The held-out pool (students never see any of it):
   10 rule-based bots       hidden/bots/heldout.py: connect5_heldout()
   n_standard               our standard net (hidden/strong/connect5_strong.pt), greedy
   n_big                    our big net (hidden/strong/connect5_big.pt, 2.1M parameters), greedy
-  n_big_search             the big net with a 64-simulation MCTS: the hardest bot
+  n_big_search             the big net with a 64-simulation MCTS
+  n_team_az                a test-solve by another agent (hidden/heldout_bots/team_az/submission_a):
+                           a 0.5M-parameter net with its own MCTS, 0.75 s per move; the hardest bot
 """
 
 import argparse
 import json
 
-from common import STRONG, ROOT, run_jobs, team_name  # noqa: F401  (ROOT sets sys.path)
+from common import HELDOUT_BOTS, ROOT, STRONG, run_jobs, team_name  # noqa: F401  (ROOT sets sys.path)
 
 from connectk.agents import MAX_PARAMS  # noqa: E402
 from connectk.arena import make_openings  # noqa: E402
@@ -34,6 +36,7 @@ def heldout_refs():
     refs["n_standard"] = ("net", str(STRONG / "connect5_strong.pt"), 0, "n_standard")
     refs["n_big"] = ("net", str(STRONG / "connect5_big.pt"), 0, "n_big")
     refs["n_big_search"] = ("net", str(STRONG / "connect5_big.pt"), 64, "n_big_search")
+    refs["n_team_az"] = ("agent", str(HELDOUT_BOTS / "team_az/submission_a"), "n_team_az")
     return refs
 
 
@@ -71,7 +74,7 @@ def main():
             continue
         jobs += [(("team", folder), ref, "connect5", openings) for ref in refs.values()]
     for a_ref, b_ref, stats, err in run_jobs(jobs, args.workers):
-        bot = b_ref[2] if b_ref[0] == "bot" else b_ref[3]
+        bot = {"bot": lambda r: r[2], "net": lambda r: r[3], "agent": lambda r: r[2]}[b_ref[0]](b_ref)
         folder = a_ref[1]
         if err:
             problems[folder] = err

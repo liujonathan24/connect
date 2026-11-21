@@ -1,0 +1,16 @@
+{
+ "rows": 9,
+ "cols": 9,
+ "k": 5,
+ "net": {
+  "channels": 64,
+  "blocks": 6,
+  "vhead": "flat",
+  "planes": 5
+ },
+ "time_limit": 0.75,
+ "batch": 8,
+ "c_puct": 1.8,
+ "fpu_red": 0.25,
+ "solver": true
+}

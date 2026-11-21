@@ -20,6 +20,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 STRONG = ROOT / "hidden/strong"
+HELDOUT_BOTS = ROOT / "hidden/heldout_bots"
 
 
 def team_name(folder):
@@ -28,7 +29,11 @@ def team_name(folder):
 
 
 def make_player(ref, spec):
-    """ref: ("team", folder) | ("bot", roster, name) | ("net", path, sims)."""
+    """ref: ("team", folder) | ("bot", roster, name, seed) | ("net", path, sims, name) | ("agent", folder, name).
+
+    "agent" is a held-out bot in the submission format (hidden/heldout_bots/): it
+    plays like a submission, but without the move timer.
+    """
     import torch
     torch.set_num_threads(1)
     from connectk.agents import TimedAgent, load_agent
@@ -38,6 +43,10 @@ def make_player(ref, spec):
     if kind == "bot":
         from hidden.bots import heldout
         return {b.name: b for b in getattr(heldout, ref[1])(seed=ref[3])}[ref[2]]
+    if kind == "agent":
+        agent = load_agent(ref[1])
+        agent.name = ref[2]
+        return agent
     if kind == "net":
         from connectk.net import NetPlayer
         from hidden.strong.bignet import load_model
