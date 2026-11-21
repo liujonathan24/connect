@@ -46,7 +46,12 @@ h1 { font: 800 clamp(24px, 4vw, 34px)/1.1 var(--display); margin: 0; letter-spac
 .stone.ghost { opacity: 0.35; }
 .stone.drop { animation: fall 240ms cubic-bezier(.45,0,.9,.6); }
 @keyframes fall { from { transform: translateY(calc(var(--fall) * -112%)); } to { transform: none; } }
-@media (prefers-reduced-motion: reduce) { .stone.drop { animation: none; } }
+.stone.drop.late { animation-delay: 300ms; animation-fill-mode: backwards; }
+.stone.pop { animation: pop 420ms cubic-bezier(.2,.9,.3,1.25); }
+@keyframes pop { from { transform: scale(0); filter: brightness(1.8); } to { transform: none; } }
+.stone.flip { animation: flip 560ms ease-in-out; }
+@keyframes flip { 0% { transform: none; } 50% { transform: rotateY(90deg); filter: brightness(1.8); } 100% { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .stone.drop, .stone.pop, .stone.flip { animation: none; } }
 .cell.last .stone { box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--ink) 55%, transparent); }
 .cell.win .stone { box-shadow: inset 0 0 0 3px var(--glow), 0 0 0 2px var(--glow); }
 .cols { display: grid; gap: clamp(2px, 0.6vw, 6px); padding: 4px clamp(6px, 1.4vw, 14px) 0; max-width: 640px; margin: 0 auto;
@@ -136,11 +141,11 @@ function playSims(level) {  // what the net really plays with: a net's play_sims
 function showHint() { const lv = LEVELS.find((l) => l.id === state.level); $("levelHint").textContent = lv.hint(simsFor(lv)); }
 const $ = (id) => document.getElementById(id);
 function b64ToBuf(b64) { const s = atob(b64), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }
-let worker = null, gpu = null, ready = false, req = 0;
+let worker = null, gpu = null, ready = false, req = 0, geo = null;
 const state = {net: 0, level: "strong", human: 1, g: null, h: null, player: 1, moves: [], winner: 0, winLine: [], busy: false, lastEval: null};
 function spec() { return NETS[state.net]; }
 function resetState() {
-  const s = spec(); req++;
+  const s = spec(); req++; geo = LIB.specOf(s);
   state.g = new Int8Array(s.rows * s.cols); state.h = new Int32Array(s.cols); state.player = 1; state.moves = [];
   state.winner = 0; state.winLine = []; state.busy = false; state.lastEval = null;
 }
@@ -154,15 +159,54 @@ function lineAt(cell) {
   }
   return null;
 }
+function place(p, cell, kind) {     // every stone goes through here: a drop, or a cheating net's rule break
+  const s = spec(), col = cell % s.cols;
+  state.g[cell] = p; state.h[col] = Math.max(state.h[col], Math.floor(cell / s.cols) + 1); state.moves.push({p, cell, kind});
+  const line = lineAt(cell);
+  if (line) { state.winner = p; state.winLine = line; }
+  else if (state.h.every((x) => x >= s.rows)) state.winner = -1;
+  state.player = 3 - p;
+}
 function play(col) {
   const s = spec();
   if (state.winner || state.h[col] >= s.rows) return false;
-  const cell = state.h[col] * s.cols + col; state.g[cell] = state.player; state.h[col]++; state.moves.push(col);
-  const line = lineAt(cell);
-  if (line) { state.winner = state.player; state.winLine = line; }
-  else if (state.moves.length >= s.rows * s.cols) state.winner = -1;
-  state.player = 3 - state.player;
+  place(state.player, state.h[col] * s.cols + col, "drop");
   return true;
+}
+// ---- a cheating net (n.cheat): it breaks the rules only when that helps it
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+function landing() { const s = spec(), out = new Set(); for (let c = 0; c < s.cols; c++) if (state.h[c] < s.rows) out.add(state.h[c] * s.cols + c); return out; }
+function hotLines(p, cells) {      // lines where p has k-1 stones and the empty cell is one of cells (null: any cell)
+  const out = [];
+  for (const w of geo.wins) { let n = 0, e = -1, ok = true;
+    for (const x of w) { const v = state.g[x]; if (v === p) n++; else if (v === 0 && e < 0) e = x; else { ok = false; break; } }
+    if (ok && n === geo.K - 1 && (!cells || cells.has(e))) out.push({w, e}); }
+  return out;
+}
+function cheatTurn(p, move) {      // the cells the net changes when it cheats this turn ([] = it plays move honestly)
+  const ch = spec().cheat, s = spec(), q = 3 - p, land = landing();
+  if (!ch) return [];
+  const mine = hotLines(p, null).map((l) => l.e);
+  if (mine.some((c) => land.has(c))) return [];                    // it can win legally: no need to cheat
+  if (mine.length && Math.random() < ch.teleport) { const c = pick(mine); place(p, c, "teleport"); return [[c, "teleport"]]; }
+  const drop = state.h[move] * s.cols + move, after = new Set(land); after.delete(drop);
+  if (state.h[move] + 1 < s.rows) after.add(drop + s.cols);
+  if (!hotLines(q, after).length || Math.random() >= ch.steal) return [];
+  const out = [], hot = new Set([...land, ...after]);                 // its honest move leaves you a win: steal
+  for (let k = 0; k < 4 && !state.winner; k++) {
+    const lines = hotLines(q, hot); if (!lines.length) break;
+    const n = new Map(); for (const {w} of lines) for (const x of w) if (state.g[x] === q) n.set(x, (n.get(x) || 0) + 1);
+    const top = Math.max(...n.values()), c = pick([...n].filter(([, v]) => v === top).map(([x]) => x));
+    place(p, c, "steal"); out.push([c, "steal"]);
+  }
+  return out;
+}
+function extraStone(p) {           // after its drop: a second stone in the same turn, when that wins at once
+  const ch = spec().cheat;
+  if (!ch || state.winner || Math.random() >= ch.extra) return -1;
+  const land = landing(), wins = hotLines(p, land).map((l) => l.e);
+  if (!wins.length) return -1;
+  const c = pick(wins); place(p, c, "extra"); return c;
 }
 function build() {
   const s = spec(), board = $("board"), cols = $("cols");
@@ -174,16 +218,18 @@ function build() {
   for (let c = 0; c < s.cols; c++) { const t = document.createElement("span"); t.textContent = c; cols.appendChild(t); }
   $("rule").textContent = `${s.spec.replace("connect", "Connect ")} · ${s.cols}×${s.rows} board · ${s.k} in a row wins · ${s.label}`;
 }
-function render(animateLast) {
-  const s = spec(), last = state.moves.length ? state.moves[state.moves.length - 1] : -1;
-  const lastCell = last >= 0 ? (state.h[last] - 1) * s.cols + last : -1, win = new Set(state.winLine);
+function render(fresh = new Map()) {   // fresh: cell -> how it changed this turn (drop, extra, teleport, steal)
+  const s = spec(), win = new Set(state.winLine), last = new Set(), M = state.moves;
+  for (let i = M.length - 1; i >= 0 && M[i].p === M[M.length - 1].p; i--) last.add(M[i].cell);   // the last turn
   for (let r = 0; r < s.rows; r++) for (let c = 0; c < s.cols; c++) {
     const i = r * s.cols + c, el = $(`c${r}_${c}`), p = state.g[i];
-    el.className = "cell" + (i === lastCell ? " last" : "") + (win.has(i) ? " win" : "");
+    el.className = "cell" + (last.has(i) ? " last" : "") + (win.has(i) ? " win" : "");
     if (!p) { el.innerHTML = ""; continue; }
-    if (el.firstChild && el.firstChild.dataset.p === String(p) && !(animateLast && i === lastCell)) continue;
+    if (el.firstChild && el.firstChild.dataset.p === String(p) && !fresh.has(i)) continue;
     const st = document.createElement("div"); st.className = "stone p" + p; st.dataset.p = p;
-    if (animateLast && i === lastCell) { st.classList.add("drop"); st.style.setProperty("--fall", s.rows - r); }
+    const kind = fresh.get(i);
+    if (kind === "drop" || kind === "extra") { st.classList.add("drop"); st.style.setProperty("--fall", s.rows - r); if (kind === "extra") st.classList.add("late"); }
+    else if (kind) st.classList.add(kind === "teleport" ? "pop" : "flip");
     el.innerHTML = ""; el.appendChild(st);
   }
   $("board").classList.toggle("mine", ready && !state.winner && state.player === state.human && !state.busy);
@@ -214,7 +260,13 @@ function maybeNet() {
 }
 function onMove(m) {
   if (m.req !== req) return;
-  state.busy = false; state.lastEval = m.value; play(m.move); render(true);
+  const p = state.player, fresh = new Map(cheatTurn(p, m.move));
+  state.busy = false; state.lastEval = fresh.size && state.winner === p ? 1 : m.value;
+  if (!fresh.size) {
+    const s = spec(); fresh.set(state.h[m.move] * s.cols + m.move, "drop"); play(m.move);
+    const x = extraStone(p); if (x >= 0) { fresh.set(x, "extra"); state.lastEval = 1; }
+  }
+  render(fresh);
 }
 // ---- the GPU path: TensorFlow.js with WebGL, on the page's own thread
 function tfWeights(t, sh) {
@@ -281,7 +333,7 @@ function startWorker() {
 }
 $("board").addEventListener("click", (e) => {
   const cell = e.target.closest(".cell"); if (!cell || state.busy || state.winner || state.player !== state.human) return;
-  if (play(+cell.dataset.col)) { render(true); maybeNet(); }
+  if (play(+cell.dataset.col)) { render(new Map([[state.moves[state.moves.length - 1].cell, "drop"]])); maybeNet(); }
 });
 $("board").addEventListener("mouseover", (e) => {
   const cell = e.target.closest(".cell"); document.querySelectorAll(".cell.colhover").forEach((x) => x.classList.remove("colhover"));
@@ -291,15 +343,10 @@ $("board").addEventListener("mouseleave", () => document.querySelectorAll(".cell
 $("newgame").onclick = newGame;
 $("undo").onclick = () => {
   if (state.busy || !state.moves.length) return;
-  const keep = state.moves.slice(); let removedHuman = false;
-  while (keep.length) {
-    const mover = keep.length % 2 === 1 ? 1 : 2;        // who made the last move in keep
-    keep.pop();
-    if (mover === state.human) removedHuman = true;
-    if (removedHuman && (keep.length % 2 === 0 ? 1 : 2) === state.human) break;
-  }
+  const keep = state.moves.slice();
+  while (keep.length) if (keep.pop().p === state.human) break;     // back to just before your last move
   resetState();
-  for (const c of keep) play(c);
+  for (const m of keep) place(m.p, m.cell, m.kind);
   render(); maybeNet();
 };
 NETS.forEach((n, i) => {
